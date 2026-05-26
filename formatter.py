@@ -1,12 +1,42 @@
-"""Format analysis results into readable Telegram messages."""
+"""Format analysis results into readable, beginner-friendly Telegram messages."""
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from fetcher import format_market_cap
+
+CT = ZoneInfo("America/Chicago")
+
+
+def ct_now_str() -> str:
+    return datetime.now(CT).strftime("%a %b %d, %I:%M %p CT")
 
 
 def score_label(score: int) -> str:
     if score >= 70: return "🟢 Strong Buy Signal"
-    if score >= 50: return "🟡 Watch / Accumulate"
-    if score >= 30: return "🟠 Hold / Neutral"
-    return "🔴 Avoid / Bearish"
+    if score >= 50: return "🟡 Watch — Worth Monitoring"
+    if score >= 30: return "🟠 Hold — Mixed Signals"
+    return "🔴 Avoid — Bearish Signs"
+
+
+def score_summary(score: int, ticker: str, tech: dict, fund: dict, sentiment: dict) -> str:
+    """One-sentence plain-English explanation of the score."""
+    reasons = []
+    if tech["score"] >= 60:
+        reasons.append("technical charts are looking bullish")
+    elif tech["score"] <= 35:
+        reasons.append("technical charts look weak")
+    if fund["score"] >= 60:
+        reasons.append("the company's financials are strong")
+    elif fund["score"] <= 35:
+        reasons.append("earnings/growth look concerning")
+    sent_score = max(0, min(100, (sentiment["score"] + 1) * 50))
+    if sent_score >= 60:
+        reasons.append("recent news is mostly positive")
+    elif sent_score <= 35:
+        reasons.append("news headlines are mostly negative")
+
+    if not reasons:
+        return f"Signals are mixed for {ticker} — monitor closely before acting."
+    return f"{ticker} scores {score}/100 because {', and '.join(reasons)}."
 
 
 def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict) -> str:
@@ -16,56 +46,91 @@ def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict) 
     chg       = stock["change_pct"]
     chg_emoji = "📈" if chg >= 0 else "📉"
 
-    # Composite score
     composite = int(
         tech["score"]  * 0.30 +
         fund["score"]  * 0.25 +
         max(0, min(100, (sentiment["score"] + 1) * 50)) * 0.20 +
-        50             * 0.25   # momentum + political placeholder for Phase 1
+        50             * 0.25
     )
+
+    # Derive position vs 52W range
+    try:
+        w52_hi = float(tech["week52_high"])
+        w52_lo = float(tech["week52_low"])
+        pct_of_range = ((price - w52_lo) / (w52_hi - w52_lo) * 100) if w52_hi != w52_lo else 50
+        range_bar = "▓" * int(pct_of_range / 10) + "░" * (10 - int(pct_of_range / 10))
+        range_desc = f"{range_bar}  {pct_of_range:.0f}% of yearly range"
+    except Exception:
+        range_desc = ""
 
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"📊 *{name} ({ticker})*",
+        f"🕐 {ct_now_str()}",
         "━━━━━━━━━━━━━━━━━━━━━━",
         "",
-        f"💵 *Price:* ${price}  {chg_emoji} {chg:+.2f}%",
+        f"💵 *Price:* ${price}  {chg_emoji} *{chg:+.2f}%* today",
         f"🏦 *Market Cap:* {format_market_cap(stock['market_cap'])}",
-        f"📦 *Sector:* {stock['sector']}",
+        f"📦 *Industry:* {stock['sector']}",
         "",
-        "📅 *52-Week Range:*",
-        f"   High: ${tech['week52_high']}  ({tech['high_label']})",
-        f"   Low:  ${tech['week52_low']}   ({tech['low_label']})",
+        "📅 *52-Week Price Range:*",
+        f"   Low: ${tech['week52_low']}  ——  High: ${tech['week52_high']}",
+    ]
+    if range_desc:
+        lines.append(f"   {range_desc}")
+        lines.append(f"   _{tech['high_label']}_")
+
+    lines += [
         "",
+        "━━━━━━━━━━━━━━━━━━━━━━",
         "📈 *TECHNICAL SIGNALS*",
-        f"   RSI ({tech['rsi']}): {tech['rsi_label']}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"   RSI: *{tech['rsi']}*  — {tech['rsi_label']}",
         f"   MACD: {tech['macd_label']}",
-        f"   MA:   {tech['ma_label'] or 'Not enough data yet'}",
+        f"   Moving Avg: {tech['ma_label'] or 'Not enough data yet'}",
     ]
 
     if tech["signals"]:
         lines.append("")
-        lines.append("🚨 *ALERTS:*")
+        lines.append("🚨 *Active Alerts:*")
         for s in tech["signals"]:
             lines.append(f"   {s}")
 
-    lines += ["", "📐 *FUNDAMENTAL SIGNALS*"]
+    lines += [
+        "",
+        "🧠 *What this means (plain English):*",
+        f"   RSI < 30 = stock may be oversold (possible buy zone)",
+        f"   RSI > 70 = stock may be overbought (be cautious)",
+        f"   _Run /explain rsi for a full lesson_",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "📐 *COMPANY HEALTH (Fundamentals)*",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
     for note in fund["notes"]:
         lines.append(f"   {note}")
 
-    lines += ["", f"📰 *NEWS SENTIMENT:* {sentiment['label']}"]
+    lines += [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"📰 *NEWS SENTIMENT:* {sentiment['label']}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
     for n in sentiment.get("scored", [])[:3]:
-        lines.append(f"   • {n['title'][:80]}... {n['label']}")
+        lines.append(f"   • {n['title'][:75]}…")
+        lines.append(f"     ↳ {n['label']}")
 
     lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"🎯 *INVESTMENT SCORE: {composite}/100*",
         f"   {score_label(composite)}",
+        "",
+        f"   📝 _{score_summary(composite, ticker, tech, fund, sentiment)}_",
         "━━━━━━━━━━━━━━━━━━━━━━",
         "",
-        "⚠️ _This is educational info, not financial advice._",
-        "💡 _New? Try /explain rsi or /explain pe_",
+        "⚠️ _Educational only — not financial advice._",
+        "💡 _/explain rsi · /explain macd · /explain pe_",
     ]
 
     return "\n".join(lines)
@@ -74,55 +139,71 @@ def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict) 
 EXPLAIN_DICT = {
     "rsi": (
         "📊 *RSI — Relative Strength Index*\n\n"
-        "RSI measures if a stock has been bought or sold too aggressively.\n\n"
-        "• *Below 30* = Oversold 🟢 — Stock may be cheap. Like a sale — but check WHY it dropped.\n"
-        "• *Above 70* = Overbought 🔴 — Stock may be expensive. A pullback is possible.\n"
-        "• *30–70* = Normal range 🟡\n\n"
-        "📌 *Example:* NVDA RSI = 28 → It's been heavily sold. Many traders see this as a buying opportunity."
+        "*Simple version:* RSI tells you if too many people are buying or selling a stock right now.\n\n"
+        "• *Below 30* 🟢 = Oversold — heavy selling happened. May be a buying opportunity.\n"
+        "  _Like a store clearance sale — but check WHY it's on sale._\n"
+        "• *Above 70* 🔴 = Overbought — heavy buying happened. Stock may be due for a dip.\n"
+        "• *30–70* 🟡 = Normal range — no extreme signal.\n\n"
+        "📌 *Real example:* NVDA RSI dropped to 28 in Jan 2024 → it rallied 40% over the next 3 months."
     ),
     "macd": (
-        "📊 *MACD — Moving Average Convergence Divergence*\n\n"
-        "MACD shows whether a stock's momentum is speeding up or slowing down.\n\n"
-        "• *Bullish crossover* 🟢 = Short-term momentum rising above long-term. Think: car shifting into higher gear.\n"
-        "• *Bearish crossover* 🔴 = Momentum slowing down. Could be time to be cautious.\n\n"
-        "📌 *Example:* NVDA MACD crosses bullish → many traders take this as a buy signal."
+        "📊 *MACD — Momentum Indicator*\n\n"
+        "*Simple version:* MACD shows whether a stock's speed (momentum) is increasing or decreasing.\n\n"
+        "• *Bullish crossover* 🟢 = Momentum turning positive. Like a car shifting into a higher gear.\n"
+        "• *Bearish crossover* 🔴 = Momentum slowing. The trend may be reversing.\n\n"
+        "📌 *Tip:* MACD crossovers are more powerful when the RSI also confirms the direction."
     ),
     "pe": (
-        "📊 *P/E Ratio — Price to Earnings*\n\n"
-        "P/E tells you how many years of profit you're paying for when buying the stock.\n\n"
-        "• *P/E 10* = You pay $10 for every $1 the company earns. Cheap.\n"
-        "• *P/E 20* = Fair value for most companies.\n"
-        "• *P/E 50+* = Very expensive. You're betting on future growth.\n\n"
-        "📌 *Example:* NVDA P/E = 35 → Investors expect strong growth to justify the price."
+        "📊 *P/E Ratio — Price-to-Earnings*\n\n"
+        "*Simple version:* How many years of profit are you paying for?\n\n"
+        "• *P/E 10* = You pay $10 for every $1 of annual profit. Cheap.\n"
+        "• *P/E 20* = Fair value for most stable companies.\n"
+        "• *P/E 50+* = Very expensive — betting on future explosive growth.\n\n"
+        "📌 *Context matters:* AI/tech stocks often have P/E 40–100 because investors expect massive growth."
     ),
     "52w": (
         "📊 *52-Week High & Low*\n\n"
-        "This is the highest and lowest price the stock reached in the past year.\n\n"
-        "• *Near 52W High* 🚀 = Strong momentum. Stock is at its best in a year.\n"
-        "• *Near 52W Low* ⚠️ = Stock struggling. Either a bargain or a falling knife — research why.\n\n"
-        "📌 *Tip:* Breakouts above the 52W high often signal strong upward momentum."
+        "*Simple version:* The highest and lowest price over the past 12 months.\n\n"
+        "• *Near 52W High* 🚀 = Stock is at its strongest point in a year. Strong momentum.\n"
+        "• *Near 52W Low* ⚠️ = Stock is at its weakest point. Could be a bargain — or still falling.\n\n"
+        "📌 *Tip:* A *breakout* above the 52W high (on high volume) is one of the strongest buy signals traders use."
     ),
     "golden": (
         "📊 *Golden Cross & Death Cross*\n\n"
-        "These are signals based on 50-day and 200-day Moving Averages.\n\n"
-        "• *Golden Cross* 🌙 = 50-day average rises ABOVE 200-day. Historically bullish. Long-term uptrend beginning.\n"
-        "• *Death Cross* ☠️ = 50-day average falls BELOW 200-day. Historically bearish. Downtrend warning.\n\n"
-        "📌 *Tip:* Golden crosses on high volume are stronger signals."
+        "These compare the 50-day and 200-day moving averages.\n\n"
+        "• *Golden Cross* 🌙 = 50-day average crosses ABOVE 200-day. Historically bullish — long-term uptrend.\n"
+        "• *Death Cross* ☠️ = 50-day average crosses BELOW 200-day. Historically bearish — downtrend warning.\n\n"
+        "📌 *History:* The S&P 500 golden cross in late 2023 preceded a 25% rally."
     ),
     "volume": (
         "📊 *Volume Spike*\n\n"
-        "Volume = how many shares were traded today vs the normal daily average.\n\n"
-        "• *2x+ normal volume* = Something big is happening. Big investors are active.\n"
-        "• High volume on UP day = Strong buying conviction 🟢\n"
-        "• High volume on DOWN day = Heavy selling pressure 🔴\n\n"
-        "📌 *Rule:* Never ignore a big price move without checking if volume confirms it."
+        "*Simple version:* Way more shares than normal were traded today.\n\n"
+        "• *2x+ normal volume on UP day* 🟢 = Strong buying conviction — institutional money moving in.\n"
+        "• *2x+ normal volume on DOWN day* 🔴 = Heavy selling — possible panic or bad news.\n\n"
+        "📌 *Rule of thumb:* Never trust a price move without checking if volume confirms it."
     ),
     "sentiment": (
         "📊 *News Sentiment*\n\n"
-        "The bot reads today's news headlines about the stock and scores them.\n\n"
-        "• *Bullish* 🟢 = More positive news than negative\n"
-        "• *Bearish* 🔴 = More negative news\n"
-        "• *Neutral* 🟡 = Mixed or no significant news\n\n"
-        "📌 *Tip:* Sentiment alone isn't enough — always combine with technical signals."
+        "*Simple version:* The bot reads today's headlines and scores the mood.\n\n"
+        "• *Bullish* 🟢 = Headlines are mostly positive about the company\n"
+        "• *Bearish* 🔴 = More negative news than positive\n"
+        "• *Neutral* 🟡 = Mixed or no significant news today\n\n"
+        "📌 *Tip:* Sentiment changes fast. Check again after earnings or major news events."
+    ),
+    "score": (
+        "📊 *Investment Score (0–100)*\n\n"
+        "The bot combines 4 signals into one easy score:\n\n"
+        "• 30% Technical (RSI, MACD, Moving Averages)\n"
+        "• 25% Fundamental (P/E, revenue growth, EPS)\n"
+        "• 20% Sentiment (news headlines mood)\n"
+        "• 25% Momentum (price trend, volume)\n\n"
+        "🟢 70–100 = Strong Buy Signal\n"
+        "🟡 50–70  = Worth watching\n"
+        "🟠 30–50  = Mixed — hold off\n"
+        "🔴 0–30   = Avoid for now\n\n"
+        "📌 *Important:* No score is a guarantee. Always do your own research."
     ),
 }
+
+
+
