@@ -1,0 +1,34 @@
+name: StockBot — Scheduled Alerts
+
+on:
+  schedule:
+    # Pre-market brief — 8:00 AM EST (13:00 UTC) Mon-Fri
+    - cron: '0 13 * * 1-5'
+    # Closing report — 4:30 PM EST (21:30 UTC) Mon-Fri
+    - cron: '30 21 * * 1-5'
+    # Weekly deep-dive — Sunday 9:00 AM EST (14:00 UTC)
+    - cron: '0 14 * * 0'
+  workflow_dispatch:
+
+jobs:
+  send-alerts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - run: pip install -r requirements.txt
+
+      - name: Send scheduled alerts
+        env:
+          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          FINNHUB_API_KEY:      ${{ secrets.FINNHUB_API_KEY }}
+          REDDIT_CLIENT_ID:     ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USER_AGENT:    StockBot/1.0
+        run: python scheduler.py
