@@ -144,40 +144,47 @@ def get_reddit_sentiment(ticker: str, limit: int = 30) -> dict:
 
 
 def format_reddit_report(ticker: str, data: dict) -> str:
-    """Format StockTwits sentiment into a readable Telegram message."""
+    """Format StockTwits sentiment into HTML for Telegram."""
+    import html as _h
+    t = _h.escape(ticker)
+
     if not data.get("available"):
         return (
-            f"📱 *STOCKTWITS SOCIAL SENTIMENT — {ticker}*\n"
-            f"   ⚠️ {data.get('note', 'Unavailable')}\n"
+            f"📱 <b>STOCKTWITS — {t}</b>\n"
+            f"   ⚠️ {_h.escape(data.get('note', 'Unavailable'))}\n"
         )
 
     lines = [
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📱 *STOCKTWITS BUZZ — {ticker}*",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"   Activity: *{data['hype_label']}*",
-        f"   Mood: {data['sentiment']}",
-        f"   Recent messages: *{data['mentions']}*",
+        f"📱 <b>STOCKTWITS — {t}</b>",
+        "",
+        f"   Activity: <b>{_h.escape(data['hype_label'])}</b>",
+        f"   Mood: {_h.escape(data['sentiment'])}",
+        f"   Recent messages: <b>{data['mentions']}</b>",
     ]
 
     watchers = data.get("watchers", 0)
     if watchers:
-        lines.append(f"   👀 Watchlist: *{watchers:,}* traders following this stock")
+        lines.append(f"   👀 Watchlist: <b>{watchers:,}</b> traders following this stock")
 
     lines += [
         "",
-        "🧠 *What this means:*",
-        "   _StockTwits is finance-only social media — pure trader sentiment._",
-        "   _Bullish/Bearish labels are self-reported by traders posting._",
-        "   _High activity + Bullish mood = strong retail conviction._",
-        "   _Always combine with RSI + news before deciding._",
+        "🧠 <b>What this means:</b>",
+        "   <i>StockTwits is finance-only social media — pure trader sentiment.</i>",
+        "   <i>Bullish/Bearish labels are self-reported by traders posting.</i>",
+        "   <i>High activity + Bullish mood = strong retail conviction.</i>",
+        "   <i>Always combine with RSI + news before deciding.</i>",
     ]
 
     if data.get("top_posts"):
-        lines += ["", "💬 *Recent Posts:*"]
+        lines += ["", "💬 <b>Recent Posts:</b>"]
         for p in data["top_posts"]:
             likes_str = f" ({p['score']} ❤️)" if p["score"] else ""
-            lines.append(f"   • {p['title'][:80]}…{likes_str}")
+            url = p.get("url", "")
+            title = _h.escape(p["title"][:80])
+            if url:
+                lines.append(f'   • <a href="{url}">{title}</a>…{likes_str}')
+            else:
+                lines.append(f"   • {title}…{likes_str}")
 
     return "\n".join(lines)
 
