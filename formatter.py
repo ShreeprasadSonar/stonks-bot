@@ -143,11 +143,25 @@ def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, 
         f"   Trend: {tech['ma_label'] or 'Not enough data yet'}",
     ]
 
+    # Bollinger Bands
+    bb = tech.get("bollinger", {})
+    if bb.get("signal"):
+        pct_b = bb.get("pct_b")
+        pct_b_str = f"  ({pct_b}% of band)" if pct_b is not None else ""
+        lines.append(f"   BB: {bb['signal']}{pct_b_str}")
+        if bb.get("lower") and bb.get("upper"):
+            lines.append(f"      _Lower band: ${bb['lower']}  |  Upper band: ${bb['upper']}_")
+
     if tech["signals"]:
         lines.append("")
         lines.append("🚨 *Active Alerts:*")
         for s in tech["signals"]:
             lines.append(f"   {s}")
+
+    # Confidence tier
+    confidence = tech.get("confidence", "")
+    if confidence:
+        lines += ["", f"   🎖️ *Signal Confidence:* {confidence}"]
 
     lines += [
         "",
