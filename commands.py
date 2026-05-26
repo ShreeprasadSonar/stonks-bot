@@ -10,7 +10,8 @@ from fundamental import score_fundamentals
 from sentiment  import score_news
 from formatter  import format_analyze_report, EXPLAIN_DICT
 from reddit     import get_reddit_sentiment, format_reddit_report
-from config import SECTORS
+from config     import SECTORS
+import watchlist as wl_db
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -149,8 +150,7 @@ async def cmd_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 
-# Simple in-memory watchlist (Phase 7 will persist to SQLite)
-WATCHLISTS: dict[int, list] = {}
+# Persistent watchlist via SQLite (watchlist.py)
 
 async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -158,10 +158,10 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /watch NVDA")
         return
     ticker = context.args[0].upper()
-    WATCHLISTS.setdefault(uid, [])
-    if ticker not in WATCHLISTS[uid]:
-        WATCHLISTS[uid].append(ticker)
-    await update.message.reply_text(f"✅ Added {ticker} to your watchlist.")
+    wl_db.add_ticker(uid, ticker)
+    await update.message.reply_text(f"✅ Added *{ticker}* to your watchlist.\nYour watchlist: " +
+                                    ", ".join(wl_db.get_watchlist(uid)),
+                                    parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -169,13 +169,16 @@ async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /unwatch NVDA")
         return
     ticker = context.args[0].upper()
-    if uid in WATCHLISTS and ticker in WATCHLISTS[uid]:
-        WATCHLISTS[uid].remove(ticker)
-    await update.message.reply_text(f"✅ Removed {ticker} from your watchlist.")
+    wl_db.remove_ticker(uid, ticker)
+    remaining = wl_db.get_watchlist(uid)
+    msg = f"✅ Removed *{ticker}* from your watchlist."
+    if remaining:
+        msg += f"\nRemaining: {', '.join(remaining)}"
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    wl  = WATCHLISTS.get(uid, [])
+    wl  = wl_db.get_watchlist(uid)
     if not wl:
         await update.message.reply_text("Your watchlist is empty.\nUse /watch NVDA to add stocks.")
         return
@@ -202,3 +205,34 @@ async def cmd_reddit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
         await update.message.reply_text(f"❌ Reddit fetch failed for {ticker}: {str(e)}")
+
+
+async def cmd_morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually trigger the morning brief on demand."""
+    import os
+    from telegram import Bot
+    from scheduler import send_morning_brief
+    await update.message.reply_text("🌅 Generating your morning brief… (3 messages, takes ~30s)")
+    try:
+        bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN", ""))
+        chat_id = str(update.effective_chat.id)
+        os.environ["TELEGRAM_CHAT_ID"] = chat_id
+        await send_morning_brief(bot)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Morning brief failed: {e}")
+
+
+async def cmd_evening(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually trigger the closing report on demand."""
+    import os
+    from telegram import Bot
+    from scheduler import send_closing_report
+    await update.message.reply_text("📊 Generating closing report… (takes ~20s)")
+    try:
+        bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN", ""))
+        chat_id = str(update.effective_chat.id)
+        os.environ["TELEGRAM_CHAT_ID"] = chat_id
+        await send_closing_report(bot)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Closing report failed: {e}")
+
