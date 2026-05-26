@@ -12,6 +12,7 @@ from commands import (
     cmd_start, cmd_help, cmd_analyze, cmd_sector,
     cmd_trending, cmd_political, cmd_explain,
     cmd_watch, cmd_unwatch, cmd_watchlist, cmd_reddit,
+    cmd_morning, cmd_evening,
 )
 from news import get_news
 
@@ -30,6 +31,7 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CT = ZoneInfo("America/Chicago")
 
 _seen_political: set = set()
+_alert_cooldowns: dict = {}   # ticker → datetime of last alert
 
 # ── Impact scoring: higher = more important, only alert if score >= ALERT_THRESHOLD
 ALERT_THRESHOLD = 7
@@ -130,6 +132,15 @@ async def political_news_monitor(app: Application):
                     if key in _seen_political:
                         continue
                     _seen_political.add(key)
+
+                    # Cooldown: suppress same ticker alerts within 4 hours
+                    from datetime import timedelta, timezone
+                    now_utc = datetime.now(timezone.utc)
+                    last_alert = _alert_cooldowns.get(ticker)
+                    if last_alert and (now_utc - last_alert) < timedelta(hours=4):
+                        logger.info(f"[{ticker}] Cooldown active — skipping alert (last: {last_alert})")
+                        continue
+                    _alert_cooldowns[ticker] = now_utc
 
                     badge = impact_badge(impact)
 
@@ -304,6 +315,8 @@ def main():
     app.add_handler(CommandHandler("unwatch",   cmd_unwatch))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
     app.add_handler(CommandHandler("reddit",    cmd_reddit))
+    app.add_handler(CommandHandler("morning",   cmd_morning))
+    app.add_handler(CommandHandler("evening",   cmd_evening))
 
     logger.info("✅ StockBot running — listening for commands")
     app.run_polling(drop_pending_updates=True)
