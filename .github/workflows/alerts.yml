@@ -1,7 +1,7 @@
 name: StockBot — Scheduled Alerts
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE20: true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 on:
   schedule:
