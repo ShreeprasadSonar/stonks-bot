@@ -11,7 +11,7 @@ from config import TELEGRAM_TOKEN, SECTORS
 from commands import (
     cmd_start, cmd_help, cmd_analyze, cmd_sector,
     cmd_trending, cmd_political, cmd_explain,
-    cmd_watch, cmd_unwatch, cmd_watchlist,
+    cmd_watch, cmd_unwatch, cmd_watchlist, cmd_reddit,
 )
 from news import get_news
 
@@ -265,6 +265,7 @@ async def send_startup_message(app: Application):
         "  /sector AI — Top movers in AI/Semi/Cloud/Software\n"
         "  /trending — Today's top 5 momentum stocks\n"
         "  /political NVDA — Political & government signals\n"
+        "  /reddit NVDA — Reddit/WSB hype & social buzz\n"
         "  /watch NVDA — Add to your watchlist\n"
         "  /explain rsi — Plain-English metric guide\n\n"
         "🏛️ *Smart Political Monitor:* ON\n"
@@ -302,6 +303,7 @@ def main():
     app.add_handler(CommandHandler("watch",     cmd_watch))
     app.add_handler(CommandHandler("unwatch",   cmd_unwatch))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
+    app.add_handler(CommandHandler("reddit",    cmd_reddit))
 
     logger.info("✅ StockBot running — listening for commands")
     app.run_polling(drop_pending_updates=True)
