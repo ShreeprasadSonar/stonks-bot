@@ -1,13 +1,23 @@
-"""Format analysis results into readable, beginner-friendly Telegram messages."""
+"""Format analysis results into readable, beginner-friendly Telegram messages.
+Uses HTML parse mode throughout — supports clickable hyperlinks in news.
+"""
+import html as _html
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from fetcher import format_market_cap
 
 CT = ZoneInfo("America/Chicago")
 
+DIV = "──────────────────────"   # clean thin divider
+
 
 def ct_now_str() -> str:
     return datetime.now(CT).strftime("%a %b %d, %I:%M %p CT")
+
+
+def _e(text) -> str:
+    """Escape HTML special characters in user-provided content."""
+    return _html.escape(str(text))
 
 
 def score_label(score: int) -> str:
@@ -33,18 +43,22 @@ def score_summary(score: int, ticker: str, tech: dict, fund: dict, sentiment: di
         reasons.append("recent news is mostly positive")
     elif sent_score <= 35:
         reasons.append("news headlines are mostly negative")
-
     if not reasons:
         return f"Signals are mixed for {ticker} — monitor closely before acting."
     return f"{ticker} scores {score}/100 because {', and '.join(reasons)}."
 
 
 def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, reddit: dict = None) -> str:
-    ticker    = stock["ticker"]
-    name      = stock["name"]
+    """
+    Returns an HTML-formatted report for Telegram (use ParseMode.HTML).
+    News headlines are embedded hyperlinks — tap to read the full article.
+    """
+    ticker    = _e(stock["ticker"])
+    name      = _e(stock["name"])
     price     = stock["price"]
     chg       = stock["change_pct"]
     chg_emoji = "📈" if chg >= 0 else "📉"
+    chg_color = "+" if chg >= 0 else ""
 
     composite = int(
         tech["score"]  * 0.30 +
@@ -53,279 +67,182 @@ def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, 
         50             * 0.25
     )
 
-    # 52W range bar
+    # ── 52W range bar ─────────────────────────────────────────
     try:
         w52_hi = float(tech["week52_high"])
         w52_lo = float(tech["week52_low"])
         pct_of_range = ((price - w52_lo) / (w52_hi - w52_lo) * 100) if w52_hi != w52_lo else 50
-        range_bar = "▓" * int(pct_of_range / 10) + "░" * (10 - int(pct_of_range / 10))
-        range_desc = f"{range_bar}  {pct_of_range:.0f}% of yearly range"
+        blocks   = int(pct_of_range / 10)
+        range_bar = "▓" * blocks + "░" * (10 - blocks)
+        range_desc = f"{range_bar}  <i>{pct_of_range:.0f}% of yearly range</i>"
     except Exception:
         range_desc = ""
 
-    # Earnings warning
+    # ── Earnings warning ──────────────────────────────────────
     earnings_line = ""
     try:
         ed = stock.get("earnings_date")
         if ed:
-            from datetime import datetime, timezone
+            from datetime import datetime as _dt, timezone
             if hasattr(ed, "to_pydatetime"):
                 ed = ed.to_pydatetime()
-            now = datetime.now(timezone.utc)
+            now      = _dt.now(timezone.utc)
             ed_aware = ed.replace(tzinfo=timezone.utc) if ed.tzinfo is None else ed
-            days_away = (ed_aware - now).days
-            if days_away <= 0:
-                earnings_line = "⚠️ *Earnings just passed* — watch for post-earnings move"
-            elif days_away <= 7:
-                earnings_line = f"🚨 *Earnings in {days_away} days* — HIGH RISK period. Price can swing ±20%+"
-            elif days_away <= 14:
-                earnings_line = f"⚠️ *Earnings in {days_away} days* — stocks often run up beforehand"
+            days     = (ed_aware - now).days
+            if days <= 0:
+                earnings_line = "⚠️ <b>Earnings just passed</b> — watch for post-earnings move"
+            elif days <= 7:
+                earnings_line = f"🚨 <b>Earnings in {days} days</b> — HIGH RISK. Price can swing ±20%+"
+            elif days <= 14:
+                earnings_line = f"⚠️ <b>Earnings in {days} days</b> — stocks often run up beforehand"
             else:
-                earnings_line = f"📅 *Next earnings:* ~{days_away} days away"
+                earnings_line = f"📅 Next earnings: ~{days} days away"
     except Exception:
         pass
 
+    # ── Header ────────────────────────────────────────────────
     lines = [
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📊 *{name} ({ticker})*",
+        f"📊 <b>{name} ({ticker})</b>",
         f"🕐 {ct_now_str()}",
-        "━━━━━━━━━━━━━━━━━━━━━━",
+        DIV,
         "",
-        f"💵 *Price:* ${price}  {chg_emoji} *{chg:+.2f}%* today",
-        f"🏦 *Market Cap:* {format_market_cap(stock['market_cap'])}  |  *Sector:* {stock['sector']}",
+        f"💵 <b>${price}</b>  {chg_emoji} <b>{chg_color}{chg:.2f}%</b> today",
+        f"🏦 {format_market_cap(stock['market_cap'])} cap  ·  {_e(stock['sector'])}",
     ]
-    if earnings_line:
-        lines.append(f"   {earnings_line}")
 
-    # Risk indicators row
+    if earnings_line:
+        lines += ["", earnings_line]
+
+    # Risk row
     risk_parts = []
     if stock.get("beta") is not None:
         b = stock["beta"]
-        beta_label = "High volatility" if b > 1.5 else ("Low volatility" if b < 0.8 else "Normal volatility")
-        risk_parts.append(f"Beta {b} ({beta_label})")
+        blabel = "High volatility" if b > 1.5 else ("Low volatility" if b < 0.8 else "Normal volatility")
+        risk_parts.append(f"Beta {b} ({blabel})")
     if stock.get("short_interest") is not None:
         si = stock["short_interest"]
         si_label = "🔴 Squeeze risk!" if si > 20 else ("⚠️ Elevated" if si > 10 else "Normal")
         risk_parts.append(f"Short {si}% float ({si_label})")
     if risk_parts:
-        lines.append(f"   📌 {' | '.join(risk_parts)}")
+        lines.append(f"📌 {_e('  ·  '.join(risk_parts))}")
 
+    # ── 52-Week range ─────────────────────────────────────────
     lines += [
         "",
-        "📅 *52-Week Price Range:*",
-        f"   Low: ${tech['week52_low']}  ——  High: ${tech['week52_high']}",
+        DIV,
+        f"📅 <b>52-Week Range</b>",
+        f"   Low <b>${tech['week52_low']}</b>  {range_bar if range_desc else ''}  High <b>${tech['week52_high']}</b>",
     ]
     if range_desc:
-        lines.append(f"   {range_desc}")
-        lines.append(f"   _{tech['high_label']}_")
+        lines.append(f"   {range_desc}  ·  <i>{_e(tech['high_label'])}</i>")
 
-    # Support / Resistance / ATR
+    # ── Support / Resistance / ATR ────────────────────────────
     if tech.get("support") and tech.get("resistance"):
         lines += [
             "",
-            "🎯 *Key Price Levels (20-day):*",
-            f"   🟢 Support:    ${tech['support']}  ({tech['pct_to_support']:+.1f}% below current)",
-            f"   🔴 Resistance: ${tech['resistance']}  ({tech['pct_to_resist']:+.1f}% above current)",
+            f"🎯 <b>Key Levels</b>  <i>(20-day)</i>",
+            f"   🟢 Support    <b>${tech['support']}</b>  <i>{tech['pct_to_support']:+.1f}% below</i>",
+            f"   🔴 Resistance <b>${tech['resistance']}</b>  <i>{tech['pct_to_resist']:+.1f}% above</i>",
         ]
         if tech.get("atr"):
-            lines.append(
-                f"   📐 Daily Range (ATR): ±${tech['atr']}  "
-                f"_→ set stop-loss ~${round(price - tech['atr'] * 1.5, 2)}_"
-            )
+            sl = round(price - tech["atr"] * 1.5, 2)
+            lines.append(f"   📐 ATR ±${tech['atr']}  →  <i>stop-loss ~${sl}</i>")
 
+    # ── Technical signals ─────────────────────────────────────
     lines += [
         "",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "📈 *TECHNICAL SIGNALS*",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"   RSI: *{tech['rsi']}*  — {tech['rsi_label']}",
-        f"   MACD: {tech['macd_label']}",
-        f"   Trend: {tech['ma_label'] or 'Not enough data yet'}",
+        DIV,
+        "📈 <b>TECHNICAL ANALYSIS</b>",
+        "",
+        f"   RSI <b>{tech['rsi']}</b>  {_e(tech['rsi_label'])}",
+        f"   MACD   {_e(tech['macd_label'])}",
+        f"   Trend  {_e(tech['ma_label'] or 'Not enough data yet')}",
     ]
 
-    # Bollinger Bands
     bb = tech.get("bollinger", {})
     if bb.get("signal"):
-        pct_b = bb.get("pct_b")
-        pct_b_str = f"  ({pct_b}% of band)" if pct_b is not None else ""
-        lines.append(f"   BB: {bb['signal']}{pct_b_str}")
-        if bb.get("lower") and bb.get("upper"):
-            lines.append(f"      _Lower band: ${bb['lower']}  |  Upper band: ${bb['upper']}_")
+        pct_b_str = f"  <i>({bb['pct_b']}% of band)</i>" if bb.get("pct_b") is not None else ""
+        lines.append(f"   BB     {_e(bb['signal'])}{pct_b_str}")
 
-    if tech["signals"]:
-        lines.append("")
-        lines.append("🚨 *Active Alerts:*")
+    if tech.get("signals"):
+        lines += ["", "🚨 <b>Active Alerts</b>"]
         for s in tech["signals"]:
-            lines.append(f"   {s}")
+            lines.append(f"   {_e(s)}")
 
-    # Confidence tier
     confidence = tech.get("confidence", "")
     if confidence:
-        lines += ["", f"   🎖️ *Signal Confidence:* {confidence}"]
+        lines += ["", f"   🎖️ <b>Confidence:</b> {_e(confidence)}"]
 
+    # ── Fundamentals ──────────────────────────────────────────
     lines += [
         "",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "📐 *COMPANY HEALTH*",
-        "━━━━━━━━━━━━━━━━━━━━━━",
+        DIV,
+        "📐 <b>COMPANY HEALTH</b>",
+        "",
     ]
-    for note in fund["notes"]:
-        lines.append(f"   {note}")
-    if not fund["notes"]:
+    if fund["notes"]:
+        for note in fund["notes"]:
+            lines.append(f"   {_e(note)}")
+    else:
         lines.append("   ⚠️ Fundamental data unavailable — check again later")
 
+    # ── News with clickable links ─────────────────────────────
     lines += [
         "",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📰 *NEWS SENTIMENT:* {sentiment['label']}",
-        "━━━━━━━━━━━━━━━━━━━━━━",
+        DIV,
+        f"📰 <b>NEWS</b>  ·  {_e(sentiment['label'])}",
+        "<i>Tap any headline to read the full article</i>",
+        "",
     ]
-    for n in sentiment.get("scored", [])[:3]:
-        lines.append(f"   • {n['title'][:75]}…")
-        lines.append(f"     ↳ {n['label']}")
+    top_news = sentiment.get("scored", [])[:4]
+    if top_news:
+        for n in top_news:
+            title = _e(n["title"][:80])
+            url   = n.get("link", "")
+            label = _e(n.get("label", ""))
+            source = _e(n.get("source", ""))
+            source_str = f"  <i>{source}</i>" if source else ""
+            if url:
+                lines.append(f'   • <a href="{url}">{title}</a>{source_str}')
+            else:
+                lines.append(f"   • {title}{source_str}")
+            lines.append(f"     ↳ {label}")
+    else:
+        lines.append("   No news found today")
 
-    if reddit:
-        lines += [""]
-        if reddit.get("available") and reddit.get("mentions", 0) > 0:
+    # ── StockTwits ────────────────────────────────────────────
+    if reddit and reddit.get("available"):
+        lines += ["", DIV]
+        if reddit.get("mentions", 0) > 0:
+            watchers = reddit.get("watchers", 0)
+            watcher_str = f"  ·  👀 <b>{watchers:,}</b> watching" if watchers else ""
             lines += [
-                "━━━━━━━━━━━━━━━━━━━━━━",
-                f"📱 *REDDIT BUZZ:* {reddit['hype_label']}",
-                "━━━━━━━━━━━━━━━━━━━━━━",
-                f"   Mood: {reddit['sentiment']}",
-                f"   Mentions (24h): *{reddit['mentions']}*  |  Upvotes: *{reddit['upvotes']:,}*",
-                f"   _/reddit {ticker} for full post details_",
+                f"📱 <b>STOCKTWITS</b>  ·  {_e(reddit['hype_label'])}",
+                "",
+                f"   Mood: {_e(reddit['sentiment'])}{watcher_str}",
+                f"   Recent messages: <b>{reddit['mentions']}</b>",
+                f"   <i>Tap to view on StockTwits →</i> "
+                f'<a href="https://stocktwits.com/symbol/{ticker}">stocktwits.com/{ticker}</a>',
             ]
-        elif reddit.get("available"):
+        else:
             lines += [
-                "━━━━━━━━━━━━━━━━━━━━━━",
-                "📱 *REDDIT BUZZ:* 🔇 No WSB/Reddit mentions today",
-                "━━━━━━━━━━━━━━━━━━━━━━",
+                "📱 <b>STOCKTWITS</b>  ·  🔇 Quiet — no recent activity",
             ]
 
+    # ── Investment Score ──────────────────────────────────────
+    score_bar = "🟩" * (composite // 10) + "⬜" * (10 - composite // 10)
     lines += [
         "",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"🎯 *INVESTMENT SCORE: {composite}/100*",
+        DIV,
+        f"🎯 <b>INVESTMENT SCORE: {composite}/100</b>",
+        f"   {score_bar}",
         f"   {score_label(composite)}",
         "",
-        f"   📝 _{score_summary(composite, ticker, tech, fund, sentiment)}_",
-        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"   <i>{_e(score_summary(composite, stock['ticker'], tech, fund, sentiment))}</i>",
+        DIV,
         "",
-        "⚠️ _Educational only — not financial advice._",
-        "💡 _/explain rsi · /explain 52w · /explain score_",
-    ]
-
-    return "\n".join(lines)
-    ticker    = stock["ticker"]
-    name      = stock["name"]
-    price     = stock["price"]
-    chg       = stock["change_pct"]
-    chg_emoji = "📈" if chg >= 0 else "📉"
-
-    composite = int(
-        tech["score"]  * 0.30 +
-        fund["score"]  * 0.25 +
-        max(0, min(100, (sentiment["score"] + 1) * 50)) * 0.20 +
-        50             * 0.25
-    )
-
-    # Derive position vs 52W range
-    try:
-        w52_hi = float(tech["week52_high"])
-        w52_lo = float(tech["week52_low"])
-        pct_of_range = ((price - w52_lo) / (w52_hi - w52_lo) * 100) if w52_hi != w52_lo else 50
-        range_bar = "▓" * int(pct_of_range / 10) + "░" * (10 - int(pct_of_range / 10))
-        range_desc = f"{range_bar}  {pct_of_range:.0f}% of yearly range"
-    except Exception:
-        range_desc = ""
-
-    lines = [
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📊 *{name} ({ticker})*",
-        f"🕐 {ct_now_str()}",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "",
-        f"💵 *Price:* ${price}  {chg_emoji} *{chg:+.2f}%* today",
-        f"🏦 *Market Cap:* {format_market_cap(stock['market_cap'])}",
-        f"📦 *Industry:* {stock['sector']}",
-        "",
-        "📅 *52-Week Price Range:*",
-        f"   Low: ${tech['week52_low']}  ——  High: ${tech['week52_high']}",
-    ]
-    if range_desc:
-        lines.append(f"   {range_desc}")
-        lines.append(f"   _{tech['high_label']}_")
-
-    lines += [
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "📈 *TECHNICAL SIGNALS*",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"   RSI: *{tech['rsi']}*  — {tech['rsi_label']}",
-        f"   MACD: {tech['macd_label']}",
-        f"   Moving Avg: {tech['ma_label'] or 'Not enough data yet'}",
-    ]
-
-    if tech["signals"]:
-        lines.append("")
-        lines.append("🚨 *Active Alerts:*")
-        for s in tech["signals"]:
-            lines.append(f"   {s}")
-
-    lines += [
-        "",
-        "🧠 *What this means (plain English):*",
-        f"   RSI < 30 = stock may be oversold (possible buy zone)",
-        f"   RSI > 70 = stock may be overbought (be cautious)",
-        f"   _Run /explain rsi for a full lesson_",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "📐 *COMPANY HEALTH (Fundamentals)*",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-    ]
-    for note in fund["notes"]:
-        lines.append(f"   {note}")
-
-    lines += [
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📰 *NEWS SENTIMENT:* {sentiment['label']}",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-    ]
-    for n in sentiment.get("scored", [])[:3]:
-        lines.append(f"   • {n['title'][:75]}…")
-        lines.append(f"     ↳ {n['label']}")
-
-    # Reddit section (optional — gracefully skipped if not available)
-    if reddit:
-        lines += [""]
-        if reddit.get("available") and reddit.get("mentions", 0) > 0:
-            lines += [
-                "━━━━━━━━━━━━━━━━━━━━━━",
-                f"📱 *REDDIT BUZZ:* {reddit['hype_label']}",
-                "━━━━━━━━━━━━━━━━━━━━━━",
-                f"   Mood: {reddit['sentiment']}",
-                f"   Mentions (24h): *{reddit['mentions']}*  |  Upvotes: *{reddit['upvotes']:,}*",
-                "   _Run /reddit " + stock["ticker"] + " for full post details_",
-            ]
-        elif reddit.get("available"):
-            lines += [
-                "━━━━━━━━━━━━━━━━━━━━━━",
-                "📱 *REDDIT BUZZ:* 🔇 No mentions in last 24h",
-                "━━━━━━━━━━━━━━━━━━━━━━",
-            ]
-
-    lines += [
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        f"🎯 *INVESTMENT SCORE: {composite}/100*",
-        f"   {score_label(composite)}",
-        "",
-        f"   📝 _{score_summary(composite, ticker, tech, fund, sentiment)}_",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "",
-        "⚠️ _Educational only — not financial advice._",
-        "💡 _/explain rsi · /explain macd · /explain pe_",
+        "⚠️ <i>Educational only — not financial advice</i>",
+        "💡 /explain rsi  ·  /explain score  ·  /explain 52w",
     ]
 
     return "\n".join(lines)
@@ -333,86 +250,91 @@ def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, 
 
 EXPLAIN_DICT = {
     "rsi": (
-        "📊 *RSI — Relative Strength Index*\n\n"
-        "*Simple version:* RSI tells you if too many people are buying or selling a stock right now.\n\n"
-        "• *Below 30* 🟢 = Oversold — heavy selling happened. May be a buying opportunity.\n"
-        "  _Like a store clearance sale — but check WHY it's on sale._\n"
-        "• *Above 70* 🔴 = Overbought — heavy buying happened. Stock may be due for a dip.\n"
-        "• *30–70* 🟡 = Normal range — no extreme signal.\n\n"
-        "📌 *Real example:* NVDA RSI dropped to 28 in Jan 2024 → it rallied 40% over the next 3 months."
+        "📊 <b>RSI — Relative Strength Index</b>\n\n"
+        "<b>Simple version:</b> RSI tells you if too many people are buying or selling a stock right now.\n\n"
+        "• <b>Below 30</b> 🟢 = Oversold — heavy selling happened. May be a buying opportunity.\n"
+        "  <i>Like a store clearance sale — but check WHY it's on sale.</i>\n"
+        "• <b>Above 70</b> 🔴 = Overbought — heavy buying happened. Stock may be due for a dip.\n"
+        "• <b>30–70</b> 🟡 = Normal range — no extreme signal.\n\n"
+        "📌 <b>Real example:</b> NVDA RSI dropped to 28 in Jan 2024 → it rallied 40% over the next 3 months."
     ),
     "macd": (
-        "📊 *MACD — Momentum Indicator*\n\n"
-        "*Simple version:* MACD shows whether a stock's speed (momentum) is increasing or decreasing.\n\n"
-        "• *Bullish crossover* 🟢 = Momentum turning positive. Like a car shifting into a higher gear.\n"
-        "• *Bearish crossover* 🔴 = Momentum slowing. The trend may be reversing.\n\n"
-        "📌 *Tip:* MACD crossovers are more powerful when the RSI also confirms the direction."
+        "📊 <b>MACD — Momentum Indicator</b>\n\n"
+        "<b>Simple version:</b> MACD shows whether a stock's speed (momentum) is increasing or decreasing.\n\n"
+        "• <b>Bullish crossover</b> 🟢 = Momentum turning positive. Like a car shifting into a higher gear.\n"
+        "• <b>Bearish crossover</b> 🔴 = Momentum slowing. The trend may be reversing.\n\n"
+        "📌 <b>Tip:</b> MACD crossovers are more powerful when the RSI also confirms the direction."
     ),
     "pe": (
-        "📊 *P/E Ratio — Price-to-Earnings*\n\n"
-        "*Simple version:* How many years of profit are you paying for?\n\n"
-        "• *P/E 10* = You pay $10 for every $1 of annual profit. Cheap.\n"
-        "• *P/E 20* = Fair value for most stable companies.\n"
-        "• *P/E 50+* = Very expensive — betting on future explosive growth.\n\n"
-        "📌 *Context matters:* AI/tech stocks often have P/E 40–100 because investors expect massive growth."
+        "📊 <b>P/E Ratio — Price-to-Earnings</b>\n\n"
+        "<b>Simple version:</b> How many years of profit are you paying for?\n\n"
+        "• <b>P/E 10</b> = You pay $10 for every $1 of annual profit. Cheap.\n"
+        "• <b>P/E 20</b> = Fair value for most stable companies.\n"
+        "• <b>P/E 50+</b> = Very expensive — betting on future explosive growth.\n\n"
+        "📌 <b>Context matters:</b> AI/tech stocks often have P/E 40–100 because investors expect massive growth."
     ),
     "52w": (
-        "📊 *52-Week High & Low*\n\n"
-        "*Simple version:* The highest and lowest price over the past 12 months.\n\n"
-        "• *Near 52W High* 🚀 = Stock is at its strongest point in a year. Strong momentum.\n"
-        "• *Near 52W Low* ⚠️ = Stock is at its weakest point. Could be a bargain — or still falling.\n\n"
-        "📌 *Tip:* A *breakout* above the 52W high (on high volume) is one of the strongest buy signals traders use."
+        "📊 <b>52-Week High &amp; Low</b>\n\n"
+        "<b>Simple version:</b> The highest and lowest price over the past 12 months.\n\n"
+        "• <b>Near 52W High</b> 🚀 = Stock is at its strongest point in a year. Strong momentum.\n"
+        "• <b>Near 52W Low</b> ⚠️ = Stock is at its weakest point. Could be a bargain — or still falling.\n\n"
+        "📌 <b>Tip:</b> A breakout above the 52W high (on high volume) is one of the strongest buy signals traders use."
     ),
     "golden": (
-        "📊 *Golden Cross & Death Cross*\n\n"
+        "📊 <b>Golden Cross &amp; Death Cross</b>\n\n"
         "These compare the 50-day and 200-day moving averages.\n\n"
-        "• *Golden Cross* 🌙 = 50-day average crosses ABOVE 200-day. Historically bullish — long-term uptrend.\n"
-        "• *Death Cross* ☠️ = 50-day average crosses BELOW 200-day. Historically bearish — downtrend warning.\n\n"
-        "📌 *History:* The S&P 500 golden cross in late 2023 preceded a 25% rally."
+        "• <b>Golden Cross</b> 🌙 = 50-day crosses ABOVE 200-day. Historically bullish — long-term uptrend.\n"
+        "• <b>Death Cross</b> ☠️ = 50-day crosses BELOW 200-day. Historically bearish — downtrend warning.\n\n"
+        "📌 <b>History:</b> The S&amp;P 500 golden cross in late 2023 preceded a 25% rally."
     ),
     "volume": (
-        "📊 *Volume Spike*\n\n"
-        "*Simple version:* Way more shares than normal were traded today.\n\n"
-        "• *2x+ normal volume on UP day* 🟢 = Strong buying conviction — institutional money moving in.\n"
-        "• *2x+ normal volume on DOWN day* 🔴 = Heavy selling — possible panic or bad news.\n\n"
-        "📌 *Rule of thumb:* Never trust a price move without checking if volume confirms it."
+        "📊 <b>Volume Spike</b>\n\n"
+        "<b>Simple version:</b> Way more shares than normal were traded today.\n\n"
+        "• <b>2x+ normal volume on UP day</b> 🟢 = Strong buying conviction — institutional money moving in.\n"
+        "• <b>2x+ normal volume on DOWN day</b> 🔴 = Heavy selling — possible panic or bad news.\n\n"
+        "📌 <b>Rule of thumb:</b> Never trust a price move without checking if volume confirms it."
     ),
     "sentiment": (
-        "📊 *News Sentiment*\n\n"
-        "*Simple version:* The bot reads today's headlines and scores the mood.\n\n"
-        "• *Bullish* 🟢 = Headlines are mostly positive about the company\n"
-        "• *Bearish* 🔴 = More negative news than positive\n"
-        "• *Neutral* 🟡 = Mixed or no significant news today\n\n"
-        "📌 *Tip:* Sentiment changes fast. Check again after earnings or major news events."
+        "📊 <b>News Sentiment</b>\n\n"
+        "<b>Simple version:</b> The bot reads today's headlines and scores the mood.\n\n"
+        "• <b>Bullish</b> 🟢 = Headlines are mostly positive about the company\n"
+        "• <b>Bearish</b> 🔴 = More negative news than positive\n"
+        "• <b>Neutral</b> 🟡 = Mixed or no significant news today\n\n"
+        "📌 <b>Tip:</b> Sentiment changes fast. Check again after earnings or major news events."
     ),
     "score": (
-        "📊 *Investment Score (0–100)*\n\n"
+        "📊 <b>Investment Score (0–100)</b>\n\n"
         "The bot combines 4 signals into one easy score:\n\n"
         "• 30% Technical (RSI, MACD, Moving Averages)\n"
         "• 25% Fundamental (P/E, revenue growth, EPS)\n"
         "• 20% Sentiment (news headlines mood)\n"
         "• 25% Momentum (price trend, volume)\n\n"
-        "🟢 70–100 = Strong Buy Signal\n"
-        "🟡 50–70  = Worth watching\n"
-        "🟠 30–50  = Mixed — hold off\n"
-        "🔴 0–30   = Avoid for now\n\n"
-        "📌 *Important:* No score is a guarantee. Always do your own research."
+        "🟢 <b>70–100</b> = Strong Buy Signal\n"
+        "🟡 <b>50–70</b>  = Worth watching\n"
+        "🟠 <b>30–50</b>  = Mixed — hold off\n"
+        "🔴 <b>0–30</b>   = Avoid for now\n\n"
+        "📌 <b>Important:</b> No score is a guarantee. Always do your own research."
+    ),
+    "bb": (
+        "📊 <b>Bollinger Bands</b>\n\n"
+        "<b>Simple version:</b> A price channel showing normal vs extreme price moves.\n\n"
+        "• <b>At Lower Band</b> 🟢 = Price is unusually low — possible bounce zone.\n"
+        "• <b>At Upper Band</b> 🔴 = Price is unusually high — possible pullback zone.\n"
+        "• <b>Mid-Band</b> = Normal territory — no strong signal.\n\n"
+        "📌 <b>Power tip:</b> When RSI &lt; 35 AND price touches the lower band at the same time → "
+        "that's a high-confidence oversold signal. Both indicators agreeing = stronger signal."
     ),
     "reddit": (
-        "📱 *StockTwits Social Sentiment*\n\n"
-        "*Simple version:* How much retail traders on StockTwits are talking about a stock.\n"
+        "📱 <b>StockTwits Social Sentiment</b>\n\n"
+        "<b>Simple version:</b> How much retail traders on StockTwits are talking about a stock.\n"
         "StockTwits is finance-only — every post is about stocks, so it's a cleaner signal than Reddit.\n\n"
-        "• *Extreme Hype* 🚀 = High message volume — strong retail interest\n"
-        "• *High Buzz* 🔥 = Active discussion — worth monitoring\n"
-        "• *Moderate* 💬 = Normal chatter — not a strong signal alone\n"
-        "• *Low/None* 🔇 = Quiet — institutional action may dominate\n\n"
-        "📌 *Sentiment labels:*\n"
-        "   Traders on StockTwits tag their own posts as Bullish 👍 or Bearish 👎.\n"
-        "   When 65%+ tag Bullish with high activity — that's meaningful retail conviction.\n\n"
-        "⚠️ *Warning:* Social hype moves fast. It can cause short-term price spikes but\n"
-        "   always combine with RSI + fundamentals before acting."
+        "• <b>Extreme Hype</b> 🚀 = High message volume — strong retail interest\n"
+        "• <b>High Buzz</b> 🔥 = Active discussion — worth monitoring\n"
+        "• <b>Moderate</b> 💬 = Normal chatter — not a strong signal alone\n"
+        "• <b>Low/None</b> 🔇 = Quiet — institutional action may dominate\n\n"
+        "📌 <b>Sentiment labels:</b> Traders self-tag posts as Bullish 👍 or Bearish 👎.\n"
+        "When 65%+ tag Bullish with high activity — that's meaningful retail conviction.\n\n"
+        "⚠️ <b>Warning:</b> Social hype moves fast. Always combine with RSI + fundamentals before acting."
     ),
 }
-
-
 
