@@ -262,6 +262,28 @@ async def send_startup_message(app: Application):
     """Send startup report + live snapshot + launch background tasks."""
     logger.info("🟢 StockBot startup sequence initiated")
 
+    # Register commands so Telegram shows the autocomplete menu when user types /
+    from telegram import BotCommand
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("analyze",   "Full analyst report — /analyze NVDA"),
+            BotCommand("trending",  "Today's top momentum stocks"),
+            BotCommand("sector",    "Sector movers — /sector AI"),
+            BotCommand("morning",   "Trigger morning market brief now"),
+            BotCommand("evening",   "Trigger closing report now"),
+            BotCommand("political", "Political signals — /political NVDA"),
+            BotCommand("reddit",    "Reddit/WSB buzz — /reddit NVDA"),
+            BotCommand("watch",     "Add to watchlist — /watch NVDA"),
+            BotCommand("unwatch",   "Remove from watchlist — /unwatch NVDA"),
+            BotCommand("watchlist", "View your saved stocks"),
+            BotCommand("explain",   "Learn a metric — /explain rsi"),
+            BotCommand("help",      "Show all commands"),
+            BotCommand("start",     "Welcome message"),
+        ])
+        logger.info("✅ Bot commands registered (autocomplete menu active)")
+    except Exception as e:
+        logger.warning(f"Could not set bot commands: {e}")
+
     if not CHAT_ID:
         logger.warning("⚠️ TELEGRAM_CHAT_ID not set — add it as a GitHub Secret")
         asyncio.create_task(political_news_monitor(app))
