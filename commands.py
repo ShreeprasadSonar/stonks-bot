@@ -68,7 +68,7 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reddit    = get_reddit_sentiment(ticker)
 
         report = format_analyze_report(stock, tech, fund, sentiment, reddit)
-        await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(report, parse_mode=ParseMode.HTML)
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error analyzing {ticker}: {str(e)}")
@@ -147,7 +147,7 @@ async def cmd_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         terms = ", ".join(EXPLAIN_DICT.keys())
         await update.message.reply_text(f"Unknown term. Try: {terms}")
         return
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 
 # Persistent watchlist via SQLite (watchlist.py)
@@ -201,9 +201,9 @@ async def cmd_reddit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report = format_reddit_report(ticker, data)
         report += (
             f"\n\n💡 /analyze {ticker} — full technical + fundamental report\n"
-            f"⚠️ _High social hype ≠ good investment. Always check technicals._"
+            f"<i>⚠️ High social hype ≠ good investment. Always check technicals.</i>"
         )
-        await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(report, parse_mode=ParseMode.HTML)
     except Exception as e:
         await update.message.reply_text(f"❌ StockTwits fetch failed for {ticker}: {str(e)}")
 
