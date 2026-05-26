@@ -1,29 +1,38 @@
 """Fetch news headlines from Google News RSS (free, no key needed)."""
+import logging
 import feedparser
+
+logger = logging.getLogger(__name__)
 
 
 def get_news(ticker: str, company_name: str = "", limit: int = 10) -> list:
     query     = company_name or ticker
     query_enc = query.replace(" ", "+")
     url       = f"https://news.google.com/rss/search?q={query_enc}+stock&hl=en-US&gl=US&ceid=US:en"
-    feed      = feedparser.parse(url)
-    articles  = []
-    for entry in feed.entries[:limit]:
-        articles.append({
-            "title":     entry.get("title", ""),
-            "published": entry.get("published", ""),
-            "link":      entry.get("link", ""),
-            "source":    entry.get("source", {}).get("title", ""),
-        })
-    return articles
+    try:
+        feed = feedparser.parse(url)
+        articles = []
+        for entry in feed.entries[:limit]:
+            articles.append({
+                "title":     entry.get("title", ""),
+                "published": entry.get("published", ""),
+                "link":      entry.get("link", ""),
+                "source":    entry.get("source", {}).get("title", ""),
+            })
+        logger.debug(f"[{ticker}] Fetched {len(articles)} news articles")
+        return articles
+    except Exception as e:
+        logger.error(f"[{ticker}] News fetch failed: {e}")
+        return []
 
 
 def check_political_mentions(ticker: str, company_name: str = "") -> list:
     """Scan news for political figure mentions alongside the stock."""
     political_keywords = [
-        "president", "senator", "congress", "white house", "biden", "trump",
-        "government", "federal", "pentagon", "sec", "regulation", "tariff",
-        "subsidy", "contract", "executive order"
+        "trump", "biden", "harris", "president", "senator", "congress",
+        "white house", "government", "federal", "pentagon", "sec",
+        "regulation", "tariff", "subsidy", "contract", "executive order",
+        "antitrust", "doj", "treasury", "musk", "powell"
     ]
     articles = get_news(ticker, company_name, limit=30)
     hits = []
@@ -32,4 +41,5 @@ def check_political_mentions(ticker: str, company_name: str = "") -> list:
         matched = [kw for kw in political_keywords if kw in title_lower]
         if matched:
             hits.append({**a, "political_keywords": matched})
+    logger.info(f"[{ticker}] Found {len(hits)} political mentions in {len(articles)} articles")
     return hits
