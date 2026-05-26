@@ -86,6 +86,43 @@ def get_support_resistance(hist: pd.DataFrame) -> dict:
     }
 
 
+def calculate_bollinger_bands(hist: pd.DataFrame, period: int = 20) -> dict:
+    """
+    Bollinger Bands: 20-day MA ± 2 standard deviations.
+    Lower band touch + RSI < 35 = high-confidence oversold zone.
+    Upper band touch + RSI > 65 = high-confidence overbought zone.
+    """
+    if len(hist) < period:
+        return {"upper": None, "lower": None, "mid": None, "signal": "", "pct_b": None}
+    close  = hist["Close"].astype(float)
+    mid    = close.rolling(period).mean().iloc[-1]
+    std    = close.rolling(period).std().iloc[-1]
+    upper  = mid + 2 * std
+    lower  = mid - 2 * std
+    price  = float(close.iloc[-1])
+    band_w = upper - lower if (upper - lower) != 0 else 1
+    pct_b  = round((price - lower) / band_w * 100, 1)   # 0=at lower, 100=at upper
+
+    if price <= lower * 1.01:
+        signal = "🟢 At Lower Band — potential bounce zone (oversold region)"
+    elif price >= upper * 0.99:
+        signal = "🔴 At Upper Band — potential pullback zone (overbought region)"
+    elif pct_b < 30:
+        signal = "🟡 Below Mid-Band — mild weakness"
+    elif pct_b > 70:
+        signal = "🟡 Above Mid-Band — mild strength"
+    else:
+        signal = "⚪ Mid-Band — no strong Bollinger signal"
+
+    return {
+        "upper":  round(float(upper), 2),
+        "lower":  round(float(lower), 2),
+        "mid":    round(float(mid), 2),
+        "signal": signal,
+        "pct_b":  pct_b,
+    }
+
+
 def get_technical_signals(hist: pd.DataFrame) -> dict:
     """Run all technical indicators and return signals + plain English."""
     price  = float(hist["Close"].iloc[-1])
@@ -94,6 +131,7 @@ def get_technical_signals(hist: pd.DataFrame) -> dict:
     mas    = calculate_moving_averages(hist)
     atr    = calculate_atr(hist)
     levels = get_support_resistance(hist)
+    bb     = calculate_bollinger_bands(hist)
 
     signals = []
     score   = 50
@@ -154,106 +192,64 @@ def get_technical_signals(hist: pd.DataFrame) -> dict:
         signals.append("⚠️ Near 52-Week Low — watch closely")
         score -= 5
 
+    # ── Bollinger Bands ──────────────────────────────────────
+    if bb["signal"]:
+        if "Lower Band" in bb["signal"] and rsi is not None and rsi < 35:
+            signals.append("🟢 BB + RSI: Double oversold confirmation — high-confidence buy zone")
+            score += 8
+        elif "Upper Band" in bb["signal"] and rsi is not None and rsi > 65:
+            signals.append("🔴 BB + RSI: Double overbought confirmation — high-confidence caution zone")
+            score -= 8
+        elif "Lower Band" in bb["signal"]:
+            score += 3
+        elif "Upper Band" in bb["signal"]:
+            score -= 3
+
     # ── Volume ───────────────────────────────────────────────
+    volume_ratio = 1.0
     if len(hist) >= 20:
-        avg_vol_20 = hist["Volume"].tail(20).mean()
-        today_vol  = hist["Volume"].iloc[-1]
+        avg_vol_20   = hist["Volume"].tail(20).mean()
+        today_vol    = hist["Volume"].iloc[-1]
+        volume_ratio = round(float(today_vol / avg_vol_20), 2) if avg_vol_20 > 0 else 1.0
         if today_vol > avg_vol_20 * 3:
             signals.append("⚡ Extreme volume spike (3x+ normal) — big move in progress")
             score += 5
         elif today_vol > avg_vol_20 * 2:
             signals.append("⚡ High volume (2x+ normal) — institutional activity")
 
-    return {
-        "rsi":          rsi,
-        "rsi_label":    rsi_label,
-        "macd":         macd,
-        "macd_label":   macd_label,
-        "ma50":         mas["ma50"],
-        "ma200":        mas["ma200"],
-        "ma_label":     ma_label,
-        "week52_high":  round(float(week52_high), 2),
-        "week52_low":   round(float(week52_low), 2),
-        "high_label":   high_label,
-        "low_label":    low_label,
-        "atr":          atr,
-        "support":      levels["support"],
-        "resistance":   levels["resistance"],
-        "pct_to_resist": levels["pct_to_resist"],
-        "pct_to_support": levels["pct_to_support"],
-        "signals":      signals,
-        "score":        max(0, min(100, score)),
-    }
-
-
-    # ── RSI ──────────────────────────────────────────────────
-    rsi_label = ""
-    if rsi is not None:
-        if rsi < 30:
-            rsi_label = "🟢 Oversold (potential buy zone)"
-            score += 15
-        elif rsi < 50:
-            rsi_label = "🟡 Neutral-Low"
-            score += 5
-        elif rsi < 70:
-            rsi_label = "🟡 Neutral-High"
-            score -= 5
-        else:
-            rsi_label = "🔴 Overbought (caution)"
-            score -= 15
-
-    # ── MACD ─────────────────────────────────────────────────
-    if macd["macd"] > macd["signal"]:
-        macd_label = "🟢 Bullish crossover (momentum rising)"
-        score += 10
+    # ── Confidence tier ──────────────────────────────────────
+    bullish_count = sum(1 for s in signals if any(w in s for w in ["🟢", "🌙", "🚀"]))
+    bearish_count = sum(1 for s in signals if any(w in s for w in ["🔴", "☠️", "⚠️"]))
+    if bullish_count >= 2 and bearish_count == 0:
+        confidence = "⭐ High confidence — multiple bullish signals agree"
+    elif bearish_count >= 2 and bullish_count == 0:
+        confidence = "⭐ High confidence — multiple bearish signals agree"
+    elif bullish_count > 0 and bearish_count > 0:
+        confidence = "⚠️ Mixed signals — indicators disagree, higher risk"
     else:
-        macd_label = "🔴 Bearish crossover (momentum falling)"
-        score -= 10
-
-    # ── Moving Averages ───────────────────────────────────────
-    ma_label = ""
-    if mas["ma50"] and mas["ma200"]:
-        if mas["ma50"] > mas["ma200"]:
-            ma_label = "🌙 Golden Cross — short-term trend above long-term (bullish)"
-            score += 10
-        else:
-            ma_label = "☠️ Death Cross — short-term trend below long-term (bearish)"
-            score -= 10
-    elif mas["ma50"]:
-        if price > mas["ma50"]:
-            ma_label = "🟢 Price above 50-day average (positive momentum)"
-            score += 5
-        else:
-            ma_label = "🔴 Price below 50-day average (weak momentum)"
-            score -= 5
-
-    # ── 52-Week position ──────────────────────────────────────
-    week52_high   = hist["High"].max()
-    week52_low    = hist["Low"].min()
-    pct_from_high = round((price - week52_high) / week52_high * 100, 1)
-    pct_from_low  = round((price - week52_low)  / week52_low  * 100, 1)
-    high_label    = f"{pct_from_high}% from 52W high"
-    low_label     = f"+{pct_from_low}% above 52W low"
-
-    if pct_from_high >= -2:
-        signals.append("🚀 Near 52-Week High Breakout!")
-        score += 10
-    if pct_from_low <= 5:
-        signals.append("⚠️ Near 52-Week Low — watch closely")
-        score -= 5
+        confidence = "ℹ️ Low signal strength — not enough data to be confident"
 
     return {
-        "rsi":         rsi,
-        "rsi_label":   rsi_label,
-        "macd":        macd,
-        "macd_label":  macd_label,
-        "ma50":        mas["ma50"],
-        "ma200":       mas["ma200"],
-        "ma_label":    ma_label,
-        "week52_high": round(week52_high, 2),
-        "week52_low":  round(week52_low, 2),
-        "high_label":  high_label,
-        "low_label":   low_label,
-        "signals":     signals,
-        "score":       max(0, min(100, score)),
+        "rsi":            rsi,
+        "rsi_label":      rsi_label,
+        "macd":           macd,
+        "macd_label":     macd_label,
+        "ma50":           mas["ma50"],
+        "ma200":          mas["ma200"],
+        "ma_label":       ma_label,
+        "week52_high":    round(float(week52_high), 2),
+        "week52_low":     round(float(week52_low), 2),
+        "high_label":     high_label,
+        "low_label":      low_label,
+        "atr":            atr,
+        "support":        levels["support"],
+        "resistance":     levels["resistance"],
+        "pct_to_resist":  levels["pct_to_resist"],
+        "pct_to_support": levels["pct_to_support"],
+        "bollinger":      bb,
+        "volume_ratio":   volume_ratio,
+        "signals":        signals,
+        "confidence":     confidence,
+        "score":          max(0, min(100, score)),
     }
+
