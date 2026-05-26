@@ -1,19 +1,16 @@
 name: StockBot — Run 24/7
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:          # lets you start it manually from GitHub UI
-  schedule:
-    - cron: '*/5 * * * *'    # keep-alive ping every 5 minutes (Phase 6 will use this for alerts)
+  workflow_dispatch:  # Only runs when YOU click "Run workflow" manually
+
+concurrency:
+  group: stockbot-run
+  cancel-in-progress: true
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350      # GitHub Actions max is 6 hours per job
+    timeout-minutes: 350
 
     steps:
       - name: Checkout code
@@ -31,6 +28,7 @@ jobs:
       - name: Run StockBot
         env:
           TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
           FINNHUB_API_KEY:       ${{ secrets.FINNHUB_API_KEY }}
           REDDIT_CLIENT_ID:      ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET:  ${{ secrets.REDDIT_CLIENT_SECRET }}
