@@ -1,174 +1,183 @@
 """
-Reddit social sentiment — Phase 5.
-Scans r/wallstreetbets and r/investing for ticker mentions.
-Falls back gracefully if Reddit credentials are not set.
+Social sentiment via StockTwits — no API key or credentials required.
+Replaces the previous Reddit/PRAW implementation.
+StockTwits is finance-focused social media: every post is about stocks.
 """
 import logging
-import time
-from config import REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT
+import requests
 
 logger = logging.getLogger(__name__)
 
-# Subreddits to scan (in order of market impact)
-SUBREDDITS = ["wallstreetbets", "investing", "stocks", "StockMarket"]
-
-# Sentiment words tuned for Reddit / WSB slang
 BULLISH_WORDS = [
-    "buy", "buying", "bull", "bullish", "moon", "mooning", "calls", "long",
-    "rocket", "🚀", "yolo", "squeeze", "breakout", "undervalued", "upside",
-    "strong buy", "loading", "accumulate", "hold", "hodl", "upgrade",
+    "buy", "buying", "bull", "bullish", "moon", "calls", "long",
+    "breakout", "undervalued", "upside", "squeeze", "strong", "upgrade",
+    "accumulate", "hold", "rocket", "run", "bounce", "bottom",
 ]
 BEARISH_WORDS = [
     "sell", "selling", "bear", "bearish", "puts", "short", "crash", "dump",
-    "overvalued", "avoid", "warning", "down", "downgrade", "weak", "drop",
-    "bubble", "falling", "red", "loss", "rekt", "bankrupt",
+    "overvalued", "avoid", "warning", "downgrade", "weak", "drop",
+    "bubble", "falling", "loss", "top", "resist",
 ]
 
 
-def _praw_client():
-    """Return a read-only PRAW client, or None if credentials missing."""
-    if not REDDIT_CLIENT_ID or not REDDIT_CLIENT_SECRET:
-        return None
+def get_reddit_sentiment(ticker: str, limit: int = 30) -> dict:
+    """
+    Fetch StockTwits stream for ticker.
+    Returns same dict shape as the old Reddit version so all callers work unchanged.
+    No API key needed — free public endpoint.
+    """
     try:
-        import praw
-        reddit = praw.Reddit(
-            client_id=REDDIT_CLIENT_ID,
-            client_secret=REDDIT_CLIENT_SECRET,
-            user_agent=REDDIT_USER_AGENT,
+        url  = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "StockBot/1.0"})
+
+        if resp.status_code == 404:
+            return _no_data(ticker, "Ticker not found on StockTwits")
+        if resp.status_code == 429:
+            return _no_data(ticker, "StockTwits rate limit — try again in a minute")
+        if resp.status_code != 200:
+            return _no_data(ticker, f"StockTwits returned HTTP {resp.status_code}")
+
+        data      = resp.json()
+        messages  = data.get("messages", [])
+        symbol    = data.get("symbol", {})
+
+        if not messages:
+            return {
+                "ticker":     ticker,
+                "mentions":   0,
+                "upvotes":    0,
+                "hype_score": 0,
+                "hype_label": "🔇 No StockTwits Activity",
+                "sentiment":  "🟡 No signal",
+                "top_posts":  [],
+                "available":  True,
+                "note":       "No recent messages on StockTwits",
+                "source":     "StockTwits",
+            }
+
+        bull_count = 0
+        bear_count = 0
+        bull_word  = 0
+        bear_word  = 0
+        top_posts  = []
+
+        for msg in messages[:limit]:
+            body   = (msg.get("body") or "").lower()
+            # StockTwits has explicit sentiment labels on some posts
+            entities  = msg.get("entities", {})
+            st_sent   = msg.get("entities", {}).get("sentiment", {})
+            if isinstance(st_sent, dict):
+                basic = st_sent.get("basic", "")
+                if basic == "Bullish":
+                    bull_count += 1
+                elif basic == "Bearish":
+                    bear_count += 1
+
+            bull_word += sum(1 for w in BULLISH_WORDS if w in body)
+            bear_word += sum(1 for w in BEARISH_WORDS if w in body)
+
+            if len(top_posts) < 3:
+                likes = msg.get("likes", {}).get("total", 0)
+                top_posts.append({
+                    "title": msg.get("body", "")[:100],
+                    "score": likes,
+                    "sub":   "StockTwits",
+                    "url":   f"https://stocktwits.com/symbol/{ticker}",
+                })
+
+        total_messages = len(messages)
+        total_bull     = bull_count + bull_word
+        total_bear     = bear_count + bear_word
+
+        # Hype score: message volume (0-100)
+        hype_score = min(100, total_messages * 2)
+
+        if hype_score >= 70:
+            hype_label = "🚀 Extreme Hype"
+        elif hype_score >= 40:
+            hype_label = "🔥 High Buzz"
+        elif hype_score >= 15:
+            hype_label = "💬 Moderate Activity"
+        else:
+            hype_label = "🔇 Low Activity"
+
+        if total_bull > total_bear * 1.4:
+            sentiment = "🟢 Mostly Bullish"
+        elif total_bear > total_bull * 1.4:
+            sentiment = "🔴 Mostly Bearish"
+        else:
+            sentiment = "🟡 Mixed Sentiment"
+
+        # StockTwits explicit labels are more reliable — override if available
+        if bull_count + bear_count >= 3:
+            bull_pct = bull_count / (bull_count + bear_count)
+            if bull_pct >= 0.65:
+                sentiment = f"🟢 Bullish ({bull_count}👍 vs {bear_count}👎 tagged)"
+            elif bull_pct <= 0.35:
+                sentiment = f"🔴 Bearish ({bear_count}👎 vs {bull_count}👍 tagged)"
+
+        # Also pull StockTwits watchlist count if available
+        watchers = symbol.get("watchlist_count", 0)
+
+        logger.info(
+            f"[{ticker}] StockTwits: {total_messages} msgs, "
+            f"bull={total_bull}, bear={total_bear}, watchers={watchers:,}"
         )
-        reddit.read_only = True
-        return reddit
-    except Exception as e:
-        logger.warning(f"Reddit client init failed: {e}")
-        return None
 
-
-def get_reddit_sentiment(ticker: str, limit: int = 50) -> dict:
-    """
-    Search recent Reddit posts for ticker mentions.
-    Returns a dict with: mentions, upvotes, hype_score (0-100), hype_label, sentiment, top_posts.
-    """
-    reddit = _praw_client()
-    if not reddit:
-        return _no_data(ticker, "Reddit credentials not configured")
-
-    mentions      = 0
-    total_upvotes = 0
-    bull_score    = 0
-    bear_score    = 0
-    top_posts     = []
-
-    try:
-        for sub_name in SUBREDDITS:
-            sub = reddit.subreddit(sub_name)
-            # Search last 24h
-            for post in sub.search(ticker, sort="new", time_filter="day", limit=limit):
-                text = (post.title + " " + (post.selftext or "")).lower()
-
-                # Only count if ticker appears as a standalone word (avoid false matches)
-                import re
-                if not re.search(rf'\b{re.escape(ticker.lower())}\b', text):
-                    continue
-
-                mentions      += 1
-                total_upvotes += max(0, post.score)
-                bull_score    += sum(1 for w in BULLISH_WORDS if w in text)
-                bear_score    += sum(1 for w in BEARISH_WORDS if w in text)
-
-                if len(top_posts) < 3:
-                    top_posts.append({
-                        "title":   post.title[:100],
-                        "score":   post.score,
-                        "sub":     sub_name,
-                        "url":     f"https://reddit.com{post.permalink}",
-                    })
-
-            time.sleep(0.5)  # polite rate limit between subreddits
-
-    except Exception as e:
-        logger.error(f"[{ticker}] Reddit fetch error: {e}")
-        return _no_data(ticker, str(e))
-
-    if mentions == 0:
-        logger.info(f"[{ticker}] No Reddit mentions found in last 24h")
         return {
-            "ticker":      ticker,
-            "mentions":    0,
-            "upvotes":     0,
-            "hype_score":  0,
-            "hype_label":  "🔇 No Reddit Buzz",
-            "sentiment":   "🟡 No signal",
-            "top_posts":   [],
-            "available":   True,
-            "note":        "No mentions found in last 24h",
+            "ticker":     ticker,
+            "mentions":   total_messages,
+            "upvotes":    watchers,        # repurposed field: watchlist count
+            "hype_score": hype_score,
+            "hype_label": hype_label,
+            "sentiment":  sentiment,
+            "top_posts":  top_posts,
+            "available":  True,
+            "note":       f"{watchers:,} users watch {ticker} on StockTwits",
+            "source":     "StockTwits",
+            "watchers":   watchers,
         }
 
-    # Hype score: combines mention count + upvotes (capped at 100)
-    # 10 mentions = ~50 score, each 1k upvotes = +10 points
-    hype_score = min(100, int(mentions * 4 + (total_upvotes / 500) * 10))
-
-    if hype_score >= 70:
-        hype_label = "🚀 Extreme Hype"
-    elif hype_score >= 45:
-        hype_label = "🔥 High Buzz"
-    elif hype_score >= 20:
-        hype_label = "💬 Moderate Mentions"
-    else:
-        hype_label = "🔇 Low Mentions"
-
-    # Sentiment from bull/bear word ratio
-    if bull_score > bear_score * 1.5:
-        sentiment = "🟢 Mostly Bullish"
-    elif bear_score > bull_score * 1.5:
-        sentiment = "🔴 Mostly Bearish"
-    else:
-        sentiment = "🟡 Mixed Sentiment"
-
-    logger.info(
-        f"[{ticker}] Reddit: {mentions} mentions, {total_upvotes} upvotes, "
-        f"hype={hype_score}, bull={bull_score}, bear={bear_score}"
-    )
-
-    return {
-        "ticker":     ticker,
-        "mentions":   mentions,
-        "upvotes":    total_upvotes,
-        "hype_score": hype_score,
-        "hype_label": hype_label,
-        "sentiment":  sentiment,
-        "top_posts":  top_posts,
-        "available":  True,
-        "note":       "",
-    }
+    except Exception as e:
+        logger.error(f"[{ticker}] StockTwits fetch error: {e}")
+        return _no_data(ticker, str(e))
 
 
 def format_reddit_report(ticker: str, data: dict) -> str:
-    """Format Reddit sentiment into a readable Telegram section."""
+    """Format StockTwits sentiment into a readable Telegram message."""
     if not data.get("available"):
         return (
-            f"📱 *REDDIT SOCIAL SENTIMENT*\n"
+            f"📱 *STOCKTWITS SOCIAL SENTIMENT — {ticker}*\n"
             f"   ⚠️ {data.get('note', 'Unavailable')}\n"
-            f"   _Add REDDIT_CLIENT_ID/SECRET as GitHub Secrets to enable_"
         )
 
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━",
-        "📱 *REDDIT SOCIAL BUZZ*",
+        f"📱 *STOCKTWITS BUZZ — {ticker}*",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"   Hype Level: *{data['hype_label']}*",
+        f"   Activity: *{data['hype_label']}*",
         f"   Mood: {data['sentiment']}",
-        f"   Mentions (24h): *{data['mentions']}*  |  Upvotes: *{data['upvotes']:,}*",
-        "",
-        "🧠 *What this means:*",
-        "   _High WSB hype = lots of retail trader interest._",
-        "   _Extreme hype can cause short squeezes OR sharp reversals._",
-        "   _Always combine with technical signals before deciding._",
+        f"   Recent messages: *{data['mentions']}*",
     ]
 
-    if data["top_posts"]:
-        lines += ["", "💬 *Top Posts:*"]
+    watchers = data.get("watchers", 0)
+    if watchers:
+        lines.append(f"   👀 Watchlist: *{watchers:,}* traders following this stock")
+
+    lines += [
+        "",
+        "🧠 *What this means:*",
+        "   _StockTwits is finance-only social media — pure trader sentiment._",
+        "   _Bullish/Bearish labels are self-reported by traders posting._",
+        "   _High activity + Bullish mood = strong retail conviction._",
+        "   _Always combine with RSI + news before deciding._",
+    ]
+
+    if data.get("top_posts"):
+        lines += ["", "💬 *Recent Posts:*"]
         for p in data["top_posts"]:
-            lines.append(f"   • r/{p['sub']} ({p['score']:,} ⬆️) — {p['title'][:70]}…")
+            likes_str = f" ({p['score']} ❤️)" if p["score"] else ""
+            lines.append(f"   • {p['title'][:80]}…{likes_str}")
 
     return "\n".join(lines)
 
@@ -184,4 +193,6 @@ def _no_data(ticker: str, reason: str) -> dict:
         "top_posts":  [],
         "available":  False,
         "note":       reason,
+        "source":     "StockTwits",
     }
+
