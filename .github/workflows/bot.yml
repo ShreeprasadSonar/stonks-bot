@@ -1,0 +1,35 @@
+name: StockBot — Run 24/7
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:          # lets you start it manually from GitHub UI
+  schedule:
+    - cron: '*/5 * * * *'    # keep-alive ping every 5 minutes (Phase 6 will use this for alerts)
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350      # GitHub Actions max is 6 hours per job
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run StockBot
+        env:
+          TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          FINNHUB_API_KEY:       ${{ secrets.FINNHUB_API_KEY }}
+          REDDIT_CLIENT_ID:      ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET:  ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USER_AGENT:     StockBot/1.0
+        run: python main.py
