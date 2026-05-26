@@ -53,6 +53,168 @@ def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, 
         50             * 0.25
     )
 
+    # 52W range bar
+    try:
+        w52_hi = float(tech["week52_high"])
+        w52_lo = float(tech["week52_low"])
+        pct_of_range = ((price - w52_lo) / (w52_hi - w52_lo) * 100) if w52_hi != w52_lo else 50
+        range_bar = "▓" * int(pct_of_range / 10) + "░" * (10 - int(pct_of_range / 10))
+        range_desc = f"{range_bar}  {pct_of_range:.0f}% of yearly range"
+    except Exception:
+        range_desc = ""
+
+    # Earnings warning
+    earnings_line = ""
+    try:
+        ed = stock.get("earnings_date")
+        if ed:
+            from datetime import datetime, timezone
+            if hasattr(ed, "to_pydatetime"):
+                ed = ed.to_pydatetime()
+            now = datetime.now(timezone.utc)
+            ed_aware = ed.replace(tzinfo=timezone.utc) if ed.tzinfo is None else ed
+            days_away = (ed_aware - now).days
+            if days_away <= 0:
+                earnings_line = "⚠️ *Earnings just passed* — watch for post-earnings move"
+            elif days_away <= 7:
+                earnings_line = f"🚨 *Earnings in {days_away} days* — HIGH RISK period. Price can swing ±20%+"
+            elif days_away <= 14:
+                earnings_line = f"⚠️ *Earnings in {days_away} days* — stocks often run up beforehand"
+            else:
+                earnings_line = f"📅 *Next earnings:* ~{days_away} days away"
+    except Exception:
+        pass
+
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"📊 *{name} ({ticker})*",
+        f"🕐 {ct_now_str()}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"💵 *Price:* ${price}  {chg_emoji} *{chg:+.2f}%* today",
+        f"🏦 *Market Cap:* {format_market_cap(stock['market_cap'])}  |  *Sector:* {stock['sector']}",
+    ]
+    if earnings_line:
+        lines.append(f"   {earnings_line}")
+
+    # Risk indicators row
+    risk_parts = []
+    if stock.get("beta") is not None:
+        b = stock["beta"]
+        beta_label = "High volatility" if b > 1.5 else ("Low volatility" if b < 0.8 else "Normal volatility")
+        risk_parts.append(f"Beta {b} ({beta_label})")
+    if stock.get("short_interest") is not None:
+        si = stock["short_interest"]
+        si_label = "🔴 Squeeze risk!" if si > 20 else ("⚠️ Elevated" if si > 10 else "Normal")
+        risk_parts.append(f"Short {si}% float ({si_label})")
+    if risk_parts:
+        lines.append(f"   📌 {' | '.join(risk_parts)}")
+
+    lines += [
+        "",
+        "📅 *52-Week Price Range:*",
+        f"   Low: ${tech['week52_low']}  ——  High: ${tech['week52_high']}",
+    ]
+    if range_desc:
+        lines.append(f"   {range_desc}")
+        lines.append(f"   _{tech['high_label']}_")
+
+    # Support / Resistance / ATR
+    if tech.get("support") and tech.get("resistance"):
+        lines += [
+            "",
+            "🎯 *Key Price Levels (20-day):*",
+            f"   🟢 Support:    ${tech['support']}  ({tech['pct_to_support']:+.1f}% below current)",
+            f"   🔴 Resistance: ${tech['resistance']}  ({tech['pct_to_resist']:+.1f}% above current)",
+        ]
+        if tech.get("atr"):
+            lines.append(
+                f"   📐 Daily Range (ATR): ±${tech['atr']}  "
+                f"_→ set stop-loss ~${round(price - tech['atr'] * 1.5, 2)}_"
+            )
+
+    lines += [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "📈 *TECHNICAL SIGNALS*",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"   RSI: *{tech['rsi']}*  — {tech['rsi_label']}",
+        f"   MACD: {tech['macd_label']}",
+        f"   Trend: {tech['ma_label'] or 'Not enough data yet'}",
+    ]
+
+    if tech["signals"]:
+        lines.append("")
+        lines.append("🚨 *Active Alerts:*")
+        for s in tech["signals"]:
+            lines.append(f"   {s}")
+
+    lines += [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "📐 *COMPANY HEALTH*",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for note in fund["notes"]:
+        lines.append(f"   {note}")
+    if not fund["notes"]:
+        lines.append("   ⚠️ Fundamental data unavailable — check again later")
+
+    lines += [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"📰 *NEWS SENTIMENT:* {sentiment['label']}",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    for n in sentiment.get("scored", [])[:3]:
+        lines.append(f"   • {n['title'][:75]}…")
+        lines.append(f"     ↳ {n['label']}")
+
+    if reddit:
+        lines += [""]
+        if reddit.get("available") and reddit.get("mentions", 0) > 0:
+            lines += [
+                "━━━━━━━━━━━━━━━━━━━━━━",
+                f"📱 *REDDIT BUZZ:* {reddit['hype_label']}",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+                f"   Mood: {reddit['sentiment']}",
+                f"   Mentions (24h): *{reddit['mentions']}*  |  Upvotes: *{reddit['upvotes']:,}*",
+                f"   _/reddit {ticker} for full post details_",
+            ]
+        elif reddit.get("available"):
+            lines += [
+                "━━━━━━━━━━━━━━━━━━━━━━",
+                "📱 *REDDIT BUZZ:* 🔇 No WSB/Reddit mentions today",
+                "━━━━━━━━━━━━━━━━━━━━━━",
+            ]
+
+    lines += [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"🎯 *INVESTMENT SCORE: {composite}/100*",
+        f"   {score_label(composite)}",
+        "",
+        f"   📝 _{score_summary(composite, ticker, tech, fund, sentiment)}_",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "⚠️ _Educational only — not financial advice._",
+        "💡 _/explain rsi · /explain 52w · /explain score_",
+    ]
+
+    return "\n".join(lines)
+    ticker    = stock["ticker"]
+    name      = stock["name"]
+    price     = stock["price"]
+    chg       = stock["change_pct"]
+    chg_emoji = "📈" if chg >= 0 else "📉"
+
+    composite = int(
+        tech["score"]  * 0.30 +
+        fund["score"]  * 0.25 +
+        max(0, min(100, (sentiment["score"] + 1) * 50)) * 0.20 +
+        50             * 0.25
+    )
+
     # Derive position vs 52W range
     try:
         w52_hi = float(tech["week52_high"])
