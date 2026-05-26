@@ -399,15 +399,18 @@ EXPLAIN_DICT = {
         "📌 *Important:* No score is a guarantee. Always do your own research."
     ),
     "reddit": (
-        "📱 *Reddit / WSB Social Sentiment*\n\n"
-        "*Simple version:* How much retail traders on Reddit are talking about a stock.\n\n"
-        "• *Extreme Hype* 🚀 = Thousands of mentions — could mean a short squeeze OR a pump-and-dump incoming\n"
-        "• *High Buzz* 🔥 = Heavy retail interest — worth watching closely\n"
+        "📱 *StockTwits Social Sentiment*\n\n"
+        "*Simple version:* How much retail traders on StockTwits are talking about a stock.\n"
+        "StockTwits is finance-only — every post is about stocks, so it's a cleaner signal than Reddit.\n\n"
+        "• *Extreme Hype* 🚀 = High message volume — strong retail interest\n"
+        "• *High Buzz* 🔥 = Active discussion — worth monitoring\n"
         "• *Moderate* 💬 = Normal chatter — not a strong signal alone\n"
-        "• *Low/None* 🔇 = Institutions are more in control — less retail volatility\n\n"
-        "📌 *Warning:* High WSB hype is a double-edged signal.\n"
-        "   GameStop (GME) 2021 = extreme hype → 2,000% gain then 90% crash.\n"
-        "   Always combine with RSI + fundamentals before acting."
+        "• *Low/None* 🔇 = Quiet — institutional action may dominate\n\n"
+        "📌 *Sentiment labels:*\n"
+        "   Traders on StockTwits tag their own posts as Bullish 👍 or Bearish 👎.\n"
+        "   When 65%+ tag Bullish with high activity — that's meaningful retail conviction.\n\n"
+        "⚠️ *Warning:* Social hype moves fast. It can cause short-term price spikes but\n"
+        "   always combine with RSI + fundamentals before acting."
     ),
 }
 
