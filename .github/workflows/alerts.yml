@@ -1,5 +1,8 @@
 name: StockBot — Scheduled Alerts
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE20: true
+
 on:
   schedule:
     # Pre-market brief — 8:00 AM EST (13:00 UTC) Mon-Fri
