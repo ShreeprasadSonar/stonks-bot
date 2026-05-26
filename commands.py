@@ -38,7 +38,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/sector <NAME>      — Top movers in AI / Semiconductors / Cloud / Software\n"
         "/trending           — Top 5 stocks by momentum today\n"
         "/political <TICKER> — Congressional trades & political news\n"
-        "/reddit <TICKER>    — Reddit/WSB social sentiment & hype score\n"
+        "/reddit <TICKER>    — StockTwits social sentiment & trader mood\n"
         "/watchlist          — View your watchlist\n"
         "/watch <TICKER>     — Add to watchlist\n"
         "/unwatch <TICKER>   — Remove from watchlist\n"
@@ -193,18 +193,19 @@ async def cmd_reddit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     ticker = context.args[0].upper()
-    await update.message.reply_text(f"📱 Checking Reddit buzz for {ticker}… (scanning WSB, r/investing…)")
+    await update.message.reply_text(f"📱 Checking StockTwits sentiment for {ticker}… (no login needed)")
+
 
     try:
         data   = get_reddit_sentiment(ticker)
         report = format_reddit_report(ticker, data)
         report += (
             f"\n\n💡 /analyze {ticker} — full technical + fundamental report\n"
-            f"⚠️ _High Reddit hype ≠ good investment. Always check technicals._"
+            f"⚠️ _High social hype ≠ good investment. Always check technicals._"
         )
         await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
     except Exception as e:
-        await update.message.reply_text(f"❌ Reddit fetch failed for {ticker}: {str(e)}")
+        await update.message.reply_text(f"❌ StockTwits fetch failed for {ticker}: {str(e)}")
 
 
 async def cmd_morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
