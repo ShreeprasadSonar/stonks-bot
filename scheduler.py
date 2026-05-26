@@ -17,6 +17,10 @@ from fetcher import get_top_movers, get_stock_info
 from technical import get_technical_signals
 from news import get_news
 from sentiment import score_news
+from market_context import (
+    get_market_benchmarks, get_fear_greed,
+    get_sector_etf_performance, get_macro_calendar, format_market_context,
+)
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s — %(message)s", level=logging.INFO)
 logging.getLogger("yfinance").setLevel(logging.WARNING)
@@ -63,6 +67,18 @@ async def send_morning_brief(bot: Bot):
     Structured like a professional pre-market report.
     """
     logger.info("Building morning brief...")
+
+    # ── MESSAGE 0: Market Context (SPY/QQQ + Fear & Greed + Sector ETFs) ─
+    try:
+        benchmarks  = get_market_benchmarks()
+        fear_greed  = get_fear_greed()
+        sector_etfs = get_sector_etf_performance()
+        ctx_msg     = format_market_context(benchmarks, fear_greed, sector_etfs)
+        await bot.send_message(chat_id=CHAT_ID, text=ctx_msg, parse_mode=ParseMode.MARKDOWN)
+        logger.info("Morning brief msg 0 sent (market context)")
+        await asyncio.sleep(1)
+    except Exception as e:
+        logger.warning(f"Market context failed: {e}")
 
     all_tickers = [t for tickers in SECTORS.values() for t in tickers]
     movers = get_top_movers(all_tickers)
@@ -259,9 +275,20 @@ async def send_morning_brief(bot: Bot):
     msg3_lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━",
+        "📅 *MACRO CALENDAR — TODAY'S EVENTS:*",
+        "",
+    ]
+    macro_events = get_macro_calendar()
+    for ev in macro_events:
+        msg3_lines.append(f"   • {ev}")
+
+    msg3_lines += [
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━",
         "⚠️ _Not financial advice — educational only_",
         "💡 /analyze TICKER — full analyst report on any stock",
         "💡 /trending — real-time momentum ranking",
+        "💡 /morning — trigger this brief any time | /evening — closing report",
     ]
 
     await bot.send_message(
@@ -385,13 +412,6 @@ async def main():
     else:
         print("[scheduler] Off-schedule — sending morning brief as default")
         await send_morning_brief(bot)
-
-    print("[scheduler] Done ✅")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
 
     print("[scheduler] Done ✅")
 
