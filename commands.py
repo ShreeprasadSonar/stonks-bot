@@ -9,6 +9,7 @@ from technical  import get_technical_signals
 from fundamental import score_fundamentals
 from sentiment  import score_news
 from formatter  import format_analyze_report, EXPLAIN_DICT
+from reddit     import get_reddit_sentiment, format_reddit_report
 from config import SECTORS
 
 
@@ -32,14 +33,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📖 *StockBot Commands*\n\n"
-        "/analyze <TICKER>   — Full report: price, technicals, fundamentals, sentiment\n"
+        "/analyze <TICKER>   — Full report: price, technicals, fundamentals, sentiment, Reddit buzz\n"
         "/sector <NAME>      — Top movers in AI / Semiconductors / Cloud / Software\n"
         "/trending           — Top 5 stocks by momentum today\n"
         "/political <TICKER> — Congressional trades & political news\n"
+        "/reddit <TICKER>    — Reddit/WSB social sentiment & hype score\n"
         "/watchlist          — View your watchlist\n"
         "/watch <TICKER>     — Add to watchlist\n"
         "/unwatch <TICKER>   — Remove from watchlist\n"
-        "/explain <TERM>     — Plain-English explanation (rsi, macd, pe, 52w, golden, volume, sentiment)\n"
+        "/explain <TERM>     — Plain-English explanation (rsi, macd, pe, 52w, golden, volume, sentiment, reddit)\n"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -62,8 +64,9 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fund      = score_fundamentals(stock)
         articles  = get_news(ticker, stock["name"])
         sentiment = score_news(articles)
+        reddit    = get_reddit_sentiment(ticker)
 
-        report = format_analyze_report(stock, tech, fund, sentiment)
+        report = format_analyze_report(stock, tech, fund, sentiment, reddit)
         await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
@@ -179,3 +182,23 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["📋 *Your Watchlist:*\n"] + [f"• {t}" for t in wl]
     lines.append("\n💡 Use /analyze NVDA for a full report on any stock.")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_reddit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /reddit NVDA")
+        return
+
+    ticker = context.args[0].upper()
+    await update.message.reply_text(f"📱 Checking Reddit buzz for {ticker}… (scanning WSB, r/investing…)")
+
+    try:
+        data   = get_reddit_sentiment(ticker)
+        report = format_reddit_report(ticker, data)
+        report += (
+            f"\n\n💡 /analyze {ticker} — full technical + fundamental report\n"
+            f"⚠️ _High Reddit hype ≠ good investment. Always check technicals._"
+        )
+        await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Reddit fetch failed for {ticker}: {str(e)}")
