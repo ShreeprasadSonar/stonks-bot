@@ -12,11 +12,9 @@ from telegram.error import NetworkError, TimedOut
 
 from config import TELEGRAM_TOKEN, SECTORS
 from commands import (
-    cmd_start, cmd_help, cmd_analyze, cmd_sector,
-    cmd_trending, cmd_political, cmd_explain,
-    cmd_watch, cmd_unwatch, cmd_watchlist, cmd_reddit,
-    cmd_morning, cmd_evening, cmd_button_callback,
-    cmd_social, cmd_buzz,
+    cmd_start, cmd_help, cmd_analyze, cmd_market,
+    cmd_social, cmd_political, cmd_watchlist,
+    cmd_brief, cmd_explain, cmd_button_callback,
 )
 from news import get_news
 
@@ -238,7 +236,7 @@ async def send_live_snapshot(app: Application):
     lines += [
         "",
         "─────────────────────",
-        "/analyze NVDA  ·  /trending",
+        "/analyze NVDA  ·  /market",
     ]
 
     if any_success:
@@ -261,20 +259,13 @@ async def send_startup_message(app: Application):
     try:
         await app.bot.set_my_commands([
             BotCommand("analyze",   "Full analyst report — /analyze NVDA"),
-            BotCommand("trending",  "Today's top momentum stocks"),
-            BotCommand("sector",    "Sector movers — /sector AI"),
-            BotCommand("morning",   "Trigger morning market brief now"),
-            BotCommand("evening",   "Trigger closing report now"),
-            BotCommand("social",    "Reddit + Google Trends + Congress — /social NVDA"),
-            BotCommand("buzz",      "What Reddit is talking about right now"),
+            BotCommand("market",    "Top movers + sector view"),
+            BotCommand("social",    "Reddit · Trends · Congress · Analysts — /social NVDA"),
             BotCommand("political", "Political signals + congress trades — /political NVDA"),
-            BotCommand("reddit",    "Yahoo trending + social interest — /reddit NVDA"),
-            BotCommand("watch",     "Add to watchlist — /watch NVDA"),
-            BotCommand("unwatch",   "Remove from watchlist — /unwatch NVDA"),
-            BotCommand("watchlist", "View your saved stocks"),
+            BotCommand("watchlist", "Manage your watchlist"),
+            BotCommand("brief",     "Morning or evening market brief"),
             BotCommand("explain",   "Learn a metric — /explain rsi"),
             BotCommand("help",      "Show all commands"),
-            BotCommand("start",     "Welcome message"),
         ])
         logger.info("✅ Bot commands registered (autocomplete menu active)")
     except Exception as e:
@@ -291,11 +282,11 @@ async def send_startup_message(app: Application):
         "─────────────────────\n\n"
         "<b>Commands</b>\n"
         "  /analyze NVDA — full analyst report\n"
-        "  /sector AI — sector movers\n"
-        "  /trending — top momentum stocks\n"
+        "  /market — top movers + sector view\n"
+        "  /social NVDA — Reddit · Trends · Congress\n"
         "  /political NVDA — political signals\n"
-        "  /reddit NVDA — social interest\n"
-        "  /watch NVDA · /watchlist\n"
+        "  /watchlist — manage saved stocks\n"
+        "  /brief — morning or evening brief\n"
         "  /explain rsi — metric guide\n\n"
         "<b>Political Monitor</b>  active\n"
         "  Alerts only for: President, Fed Chair, SEC, Congress\n\n"
@@ -343,18 +334,12 @@ def main():
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("help",      cmd_help))
     app.add_handler(CommandHandler("analyze",   cmd_analyze))
-    app.add_handler(CommandHandler("sector",    cmd_sector))
-    app.add_handler(CommandHandler("trending",  cmd_trending))
-    app.add_handler(CommandHandler("political", cmd_political))
-    app.add_handler(CommandHandler("explain",   cmd_explain))
-    app.add_handler(CommandHandler("watch",     cmd_watch))
-    app.add_handler(CommandHandler("unwatch",   cmd_unwatch))
-    app.add_handler(CommandHandler("watchlist", cmd_watchlist))
-    app.add_handler(CommandHandler("reddit",    cmd_reddit))
-    app.add_handler(CommandHandler("morning",   cmd_morning))
-    app.add_handler(CommandHandler("evening",   cmd_evening))
+    app.add_handler(CommandHandler("market",    cmd_market))
     app.add_handler(CommandHandler("social",    cmd_social))
-    app.add_handler(CommandHandler("buzz",      cmd_buzz))
+    app.add_handler(CommandHandler("political", cmd_political))
+    app.add_handler(CommandHandler("watchlist", cmd_watchlist))
+    app.add_handler(CommandHandler("brief",     cmd_brief))
+    app.add_handler(CommandHandler("explain",   cmd_explain))
     app.add_handler(CallbackQueryHandler(cmd_button_callback))
 
     logger.info("✅ StockBot running — listening for commands")
