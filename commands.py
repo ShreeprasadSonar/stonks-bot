@@ -3,14 +3,19 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
 
-from fetcher    import get_stock_info, get_top_movers
-from news       import get_news, check_political_mentions
-from technical  import get_technical_signals
+from fetcher     import get_stock_info, get_top_movers
+from news        import get_news, check_political_mentions
+from technical   import get_technical_signals
 from fundamental import score_fundamentals
-from sentiment  import score_news
-from formatter  import format_analyze_report, EXPLAIN_DICT
-from reddit     import get_reddit_sentiment, format_reddit_report
-from config     import SECTORS
+from sentiment   import score_news
+from formatter   import format_analyze_report, EXPLAIN_DICT
+from formatter   import _e
+from reddit      import get_reddit_sentiment, format_reddit_report
+from social      import (
+    get_full_social_report, get_congress_trades, format_congress_trades,
+    get_reddit_hot_tickers,
+)
+from config      import SECTORS
 import watchlist as wl_db
 
 # Popular tickers shown as quick-pick buttons when user taps a command with no ticker
@@ -33,35 +38,44 @@ def _ticker_buttons(cmd: str) -> InlineKeyboardMarkup:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "👋 *Welcome to StockBot!*\n\n"
-        "I'm your personal stock analyst — I give you plain-English signals so you can make better investment decisions.\n\n"
-        "📌 *Commands:*\n"
-        "  /analyze NVDA — Full analyst report\n"
-        "  /sector AI — Top movers in a sector\n"
-        "  /trending — Today's top momentum stocks\n"
-        "  /political NVDA — Political & news signals\n"
-        "  /watchlist — Your saved stocks\n"
-        "  /explain rsi — Learn what RSI means\n"
-        "  /help — Show all commands\n\n"
-        "💡 _Start with_ /analyze NVDA _to see a full report._"
+        "<b>StockBot</b> — your personal market analyst\n"
+        "─────────────────────\n\n"
+        "<b>Commands</b>\n"
+        "  /analyze NVDA — full analyst report\n"
+        "  /sector AI — sector movers\n"
+        "  /trending — top momentum stocks today\n"
+        "  /political NVDA — political &amp; government signals\n"
+        "  /reddit NVDA — social interest &amp; trending rank\n"
+        "  /watch NVDA — add to watchlist\n"
+        "  /explain rsi — learn any metric\n"
+        "  /morning · /evening — on-demand briefs\n"
+        "  /help — full command list\n\n"
+        "Start with /analyze NVDA to see a full report."
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
-        "📖 *StockBot Commands*\n\n"
-        "/analyze <TICKER>   — Full report: price, technicals, fundamentals, sentiment, Reddit buzz\n"
-        "/sector <NAME>      — Top movers in AI / Semiconductors / Cloud / Software\n"
-        "/trending           — Top 5 stocks by momentum today\n"
-        "/political <TICKER> — Congressional trades & political news\n"
-        "/reddit <TICKER>    — Yahoo trending & social interest for a stock\n"
-        "/watchlist          — View your watchlist\n"
-        "/watch <TICKER>     — Add to watchlist\n"
-        "/unwatch <TICKER>   — Remove from watchlist\n"
-        "/explain <TERM>     — Plain-English explanation (rsi, macd, pe, 52w, golden, volume, sentiment, reddit)\n"
+        "<b>StockBot — Commands</b>\n"
+        "─────────────────────\n\n"
+        "<b>Analysis</b>\n"
+        "  /analyze &lt;TICKER&gt;   Full report: price, technicals, fundamentals, news\n"
+        "  /sector &lt;NAME&gt;      Sector movers: AI · Semiconductors · Cloud · Software\n"
+        "  /trending            Top 5 momentum stocks right now\n"
+        "  /political &lt;TICKER&gt; Political &amp; government signals\n"
+        "  /reddit &lt;TICKER&gt;    Yahoo trending &amp; social interest\n\n"
+        "<b>Watchlist</b>\n"
+        "  /watchlist           View your saved stocks\n"
+        "  /watch &lt;TICKER&gt;     Add to watchlist\n"
+        "  /unwatch &lt;TICKER&gt;   Remove from watchlist\n\n"
+        "<b>Briefs</b>\n"
+        "  /morning             On-demand morning market brief\n"
+        "  /evening             On-demand closing report\n\n"
+        "<b>Learn</b>\n"
+        "  /explain &lt;TERM&gt;     rsi · macd · pe · 52w · golden · volume · sentiment · score · bb"
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -104,33 +118,38 @@ async def cmd_sector(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
 
     if not matched:
-        sectors_list = ", ".join(SECTORS.keys())
-        await update.message.reply_text(f"Usage: /sector AI\nAvailable: {sectors_list}")
+        sectors_list = " · ".join(SECTORS.keys())
+        await update.message.reply_text(
+            f"Usage: <code>/sector AI</code>\nAvailable: {sectors_list}",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     tickers = SECTORS[matched]
-    await update.message.reply_text(f"🔍 Fetching {matched} sector movers…")
+    await update.message.reply_text(f"Fetching {matched} sector…")
 
     movers = get_top_movers(tickers)
-    lines  = [f"📊 *{matched} Sector — Top Movers*\n"]
+    lines  = [f"<b>{matched} Sector</b>", "─────────────────────", ""]
     for m in movers:
-        emoji    = "📈" if m["change_pct"] >= 0 else "📉"
-        vol_flag = " ⚡ Vol spike!" if m["volume_ratio"] > 2 else ""
-        lines.append(f"{emoji} *{m['ticker']}* ${m['price']} ({m['change_pct']:+.2f}%){vol_flag}")
-    lines.append("\n💡 Use /analyze NVDA for a deep dive on any stock.")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        arrow    = "▲" if m["change_pct"] >= 0 else "▼"
+        vol_flag = "  ⚡" if m["volume_ratio"] > 2 else ""
+        lines.append(
+            f"<b>{m['ticker']}</b>  ${m['price']}  {arrow} {m['change_pct']:+.2f}%{vol_flag}"
+        )
+    lines.append(f"\n/analyze &lt;TICKER&gt; for a full deep-dive")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def cmd_trending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_tickers = [t for tickers in SECTORS.values() for t in tickers]
-    await update.message.reply_text("🔍 Finding today's top movers…")
+    await update.message.reply_text("Scanning for top movers…")
     movers = get_top_movers(all_tickers)[:5]
-    lines  = ["🔥 *Today's Top 5 Momentum Stocks*\n"]
+    lines  = ["<b>Top 5 Today</b>", "─────────────────────", ""]
     for i, m in enumerate(movers, 1):
-        emoji = "📈" if m["change_pct"] >= 0 else "📉"
-        lines.append(f"{i}. {emoji} *{m['ticker']}* — ${m['price']} ({m['change_pct']:+.2f}%)")
-    lines.append("\n💡 Use /analyze <TICKER> for a full report.")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        arrow = "▲" if m["change_pct"] >= 0 else "▼"
+        lines.append(f"{i}.  <b>{m['ticker']}</b>  ${m['price']}  {arrow} {m['change_pct']:+.2f}%")
+    lines.append("\n/analyze &lt;TICKER&gt; for a full report")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def cmd_political(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,21 +161,66 @@ async def cmd_political(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     ticker = context.args[0].upper()
-    await update.message.reply_text(f"🏛️ Checking political signals for {ticker}…")
+    await update.message.reply_text(f"Checking political signals for <b>{_e(ticker)}</b>…", parse_mode=ParseMode.HTML)
 
-    stock = get_stock_info(ticker)
-    hits  = check_political_mentions(ticker, stock.get("name", ticker))
+    stock  = get_stock_info(ticker)
+    hits   = check_political_mentions(ticker, stock.get("name", ticker))
+    trades = get_congress_trades(ticker, recent_days=90)
 
-    if not hits:
-        await update.message.reply_text(f"No recent political news found for {ticker}.")
+    if not hits and not trades:
+        await update.message.reply_text(f"No recent political signals or congressional trades for {ticker}.")
         return
 
-    lines = [f"🏛️ *Political Signals for {ticker}*\n"]
-    for h in hits[:5]:
-        keywords = ", ".join(h["political_keywords"])
-        lines.append(f"• {h['title'][:90]}…\n  _Keywords: {keywords}_\n")
-    lines.append("💡 Congressional buy/sell alerts coming in Phase 4!")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    lines = [f"<b>Political Signals — {_e(ticker)}</b>", "─────────────────────", ""]
+
+    if hits:
+        lines.append("<b>Political News</b>")
+        for h in hits[:5]:
+            keywords = ", ".join(h["political_keywords"])
+            lines.append(f"• {_e(h['title'][:90])}")
+            lines.append(f"  <i>{_e(keywords)}</i>")
+        lines.append("")
+
+    if trades:
+        buy_cnt  = sum(1 for t in trades if "purch" in t["type"].lower() or "buy" in t["type"].lower())
+        sell_cnt = len(trades) - buy_cnt
+        lines.append(f"<b>Congressional Trades  (last 90 days)</b>")
+        lines.append(f"  🟢 {buy_cnt} buys  ·  🔴 {sell_cnt} sells")
+        for tr in trades[:5]:
+            emoji = "🟢" if "purch" in tr["type"].lower() or "buy" in tr["type"].lower() else "🔴"
+            lines.append(
+                f"  {emoji} <b>{_e(tr['name'])}</b>  ({tr['chamber']})  "
+                f"{_e(tr['type'])}  ·  {tr['date']}"
+            )
+        if buy_cnt >= sell_cnt * 2 and buy_cnt >= 2:
+            lines.append("  <b>Net buying by Congress</b> — historically bullish")
+        elif sell_cnt >= buy_cnt * 2 and sell_cnt >= 2:
+            lines.append("  <b>Net selling by Congress</b> — monitor carefully")
+
+    lines.append(f"\n/social {ticker}  ·  full social intelligence report")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_social(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Full social intelligence — Reddit + Google Trends + Congress + Finviz."""
+    if not context.args:
+        await update.message.reply_text(
+            "📊 Which stock do you want the full social report for?\nTap one below or type: /social NVDA",
+            reply_markup=_ticker_buttons("social"),
+        )
+        return
+
+    ticker = context.args[0].upper()
+    await update.message.reply_text(
+        f"Gathering social intelligence for <b>{_e(ticker)}</b>…\n<i>Reddit · Google Trends · Congress · Analyst ratings</i>",
+        parse_mode=ParseMode.HTML,
+    )
+
+    try:
+        report = get_full_social_report(ticker)
+        await update.message.reply_text(report, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Social report failed: {e}")
 
 
 async def cmd_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,9 +261,11 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     ticker = context.args[0].upper()
     wl_db.add_ticker(uid, ticker)
-    await update.message.reply_text(f"✅ Added *{ticker}* to your watchlist.\nYour watchlist: " +
-                                    ", ".join(wl_db.get_watchlist(uid)),
-                                    parse_mode=ParseMode.MARKDOWN)
+    wl = wl_db.get_watchlist(uid)
+    await update.message.reply_text(
+        f"✅ Added <b>{_e(ticker)}</b>\nWatchlist: {', '.join(wl)}",
+        parse_mode=ParseMode.HTML,
+    )
 
 async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -218,10 +284,10 @@ async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ticker = context.args[0].upper()
     wl_db.remove_ticker(uid, ticker)
     remaining = wl_db.get_watchlist(uid)
-    msg = f"✅ Removed *{ticker}* from your watchlist."
+    msg = f"✅ Removed <b>{_e(ticker)}</b>"
     if remaining:
-        msg += f"\nRemaining: {', '.join(remaining)}"
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        msg += f"\nWatchlist: {', '.join(remaining)}"
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -229,12 +295,39 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not wl:
         await update.message.reply_text("Your watchlist is empty.\nUse /watch NVDA to add stocks.")
         return
-    lines = ["📋 *Your Watchlist:*\n"] + [f"• {t}" for t in wl]
-    lines.append("\n💡 Use /analyze NVDA for a full report on any stock.")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    items = "\n".join(f"  • <b>{_e(t)}</b>" for t in wl)
+    await update.message.reply_text(
+        f"<b>Watchlist</b>\n─────────────────────\n\n{items}\n\n/analyze &lt;TICKER&gt; for a full report",
+        parse_mode=ParseMode.HTML,
+    )
 
 
-async def cmd_reddit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_buzz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show what tickers WSB and r/stocks are talking about right now — no ticker needed."""
+    await update.message.reply_text("Scanning Reddit for hot tickers…")
+    try:
+        hot = get_reddit_hot_tickers(limit=12)
+        if not hot:
+            await update.message.reply_text("Reddit data unavailable right now — try again in a minute.")
+            return
+        lines = [
+            "<b>What Reddit is Talking About</b>",
+            "<i>r/wallstreetbets  ·  r/stocks  ·  most-mentioned right now</i>",
+            "─────────────────────",
+            "",
+        ]
+        for i, item in enumerate(hot, 1):
+            lines.append(
+                f"{i}.  <b>{_e(item['ticker'])}</b>  — {item['mentions']} mentions\n"
+                f"    <i>{_e(item['sample_post'])}</i>"
+            )
+        lines += ["", "─────────────────────", "/analyze &lt;TICKER&gt;  ·  /social &lt;TICKER&gt;"]
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Buzz scan failed: {e}")
+
+
+
     if not context.args:
         await update.message.reply_text(
             "📊 Which stock do you want Yahoo trending data for?\nTap one below or type: /reddit NVDA",
@@ -249,10 +342,7 @@ async def cmd_reddit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         data   = get_reddit_sentiment(ticker)
         report = format_reddit_report(ticker, data)
-        report += (
-            f"\n\n💡 /analyze {ticker} — full technical + fundamental report\n"
-            f"<i>⚠️ High social hype ≠ good investment. Always check technicals.</i>"
-        )
+        report += f"\n\n/analyze {ticker}  ·  full report"
         await update.message.reply_text(report, parse_mode=ParseMode.HTML)
     except Exception as e:
         await update.message.reply_text(f"❌ Yahoo trending fetch failed for {ticker}: {str(e)}")
@@ -329,17 +419,18 @@ async def cmd_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     elif cmd == "political":
         ticker = value.upper()
-        await context.bot.send_message(chat_id=chat_id, text=f"🏛️ Checking political signals for {ticker}…")
+        await context.bot.send_message(chat_id=chat_id, text=f"Checking political signals for <b>{_e(ticker)}</b>…", parse_mode=ParseMode.HTML)
         stock = get_stock_info(ticker)
         hits  = check_political_mentions(ticker, stock.get("name", ticker))
         if not hits:
             await context.bot.send_message(chat_id=chat_id, text=f"No recent political news found for {ticker}.")
             return
-        lines = [f"🏛️ *Political Signals for {ticker}*\n"]
+        lines = [f"<b>Political Signals — {_e(ticker)}</b>", "─────────────────────", ""]
         for h in hits[:5]:
             keywords = ", ".join(h["political_keywords"])
-            lines.append(f"• {h['title'][:90]}…\n  _Keywords: {keywords}_\n")
-        await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+            lines.append(f"• {_e(h['title'][:90])}")
+            lines.append(f"  <i>{_e(keywords)}</i>\n")
+        await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode=ParseMode.HTML)
 
     elif cmd == "reddit":
         ticker = value.upper()
@@ -347,10 +438,7 @@ async def cmd_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             data   = get_reddit_sentiment(ticker)
             report = format_reddit_report(ticker, data)
-            report += (
-                f"\n\n💡 /analyze {ticker} — full technical + fundamental report\n"
-                f"<i>⚠️ Trending ≠ good investment. Always check technicals.</i>"
-            )
+            report += f"\n\n/analyze {ticker}  ·  full report"
             await context.bot.send_message(chat_id=chat_id, text=report, parse_mode=ParseMode.HTML)
         except Exception as e:
             await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed: {e}")
@@ -366,17 +454,30 @@ async def cmd_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         wl = wl_db.get_watchlist(uid)
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"✅ Added *{ticker}* to your watchlist.\nYour watchlist: {', '.join(wl)}",
-            parse_mode=ParseMode.MARKDOWN,
+            text=f"✅ Added <b>{_e(ticker)}</b>\nWatchlist: {', '.join(wl)}",
+            parse_mode=ParseMode.HTML,
         )
+
+    elif cmd == "social":
+        ticker = value.upper()
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Gathering social intelligence for <b>{_e(ticker)}</b>…",
+            parse_mode=ParseMode.HTML,
+        )
+        try:
+            report = get_full_social_report(ticker)
+            await context.bot.send_message(chat_id=chat_id, text=report, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"❌ Failed: {e}")
 
     elif cmd == "unwatch":
         ticker = value.upper()
         wl_db.remove_ticker(uid, ticker)
         remaining = wl_db.get_watchlist(uid)
-        msg = f"✅ Removed *{ticker}* from your watchlist."
+        msg = f"✅ Removed <b>{_e(ticker)}</b>"
         if remaining:
-            msg += f"\nRemaining: {', '.join(remaining)}"
-        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN)
+            msg += f"\nWatchlist: {', '.join(remaining)}"
+        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML)
 
 
