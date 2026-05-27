@@ -92,7 +92,11 @@ async def send_morning_brief(bot: Bot):
     except Exception as e:
         logger.warning(f"Market context failed: {e}")
 
-    all_tickers = [t for tickers in SECTORS.values() for t in tickers]
+    try:
+        from reddit import get_dynamic_tickers
+        all_tickers = get_dynamic_tickers()
+    except Exception:
+        all_tickers = [t for tickers in SECTORS.values() for t in tickers]
     movers = get_top_movers(all_tickers)
 
     if not movers:
@@ -360,7 +364,11 @@ async def send_closing_report(bot: Bot):
     """End-of-day report: gainers, losers, sentiment summary, what moved markets."""
     logger.info("Building closing report...")
 
-    all_tickers = [t for tickers in SECTORS.values() for t in tickers]
+    try:
+        from reddit import get_dynamic_tickers
+        all_tickers = get_dynamic_tickers()
+    except Exception:
+        all_tickers = [t for tickers in SECTORS.values() for t in tickers]
     movers  = get_top_movers(all_tickers)
     gainers = [m for m in movers if m["change_pct"] > 0][:4]
     losers  = sorted(movers, key=lambda x: x["change_pct"])[:3]
