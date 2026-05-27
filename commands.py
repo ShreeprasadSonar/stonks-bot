@@ -17,14 +17,47 @@ import watchlist as wl_db
 
 POPULAR_TICKERS = ["NVDA", "MSFT", "AMD", "TSLA", "AAPL", "META", "GOOGL", "AMZN"]
 
+# Cache trending tickers so we don't hit Yahoo on every button press
+_trending_cache: list = []
+_trending_cache_time: float = 0.0
 
-def _ticker_kbd(cmd: str) -> InlineKeyboardMarkup:
+
+async def _get_suggestion_tickers() -> list:
+    """
+    Returns up to 8 suggestion tickers: trending-first, then popular fallbacks.
+    Result is cached for 10 minutes to avoid repeated network calls.
+    """
+    import time
+    global _trending_cache, _trending_cache_time
+    if time.time() - _trending_cache_time < 600 and _trending_cache:
+        return _trending_cache[:8]
+    try:
+        from reddit import get_trending_tickers
+        SKIP = {"SPY", "QQQ", "DIA", "IWM", "VIX", "GLD", "SLV", "USO", "TLT", "BTC-USD", "ETH-USD"}
+        live = [t for t in get_trending_tickers(20) if t.isalpha() and len(t) <= 5 and t not in SKIP]
+        # Merge: trending first, fill remaining slots with popular fallbacks
+        seen, merged = set(), []
+        for t in live + POPULAR_TICKERS:
+            if t not in seen:
+                seen.add(t)
+                merged.append(t)
+        _trending_cache      = merged[:8]
+        _trending_cache_time = time.time()
+    except Exception:
+        _trending_cache = POPULAR_TICKERS[:8]
+    return _trending_cache
+
+
+async def _ticker_kbd(cmd: str) -> InlineKeyboardMarkup:
+    """Inline keyboard with live trending + popular tickers."""
+    tickers = await _get_suggestion_tickers()
     rows, row = [], []
-    for t in POPULAR_TICKERS:
+    for t in tickers:
         row.append(InlineKeyboardButton(t, callback_data=f"{cmd}:{t}"))
         if len(row) == 4:
             rows.append(row); row = []
-    if row: rows.append(row)
+    if row:
+        rows.append(row)
     return InlineKeyboardMarkup(rows)
 
 
@@ -55,7 +88,7 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Which stock do you want to analyze?",
-            reply_markup=_ticker_kbd("analyze"),
+            reply_markup=await _ticker_kbd("analyze"),
         )
         return
     ticker = context.args[0].upper()
@@ -286,7 +319,7 @@ async def cmd_social(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Which stock do you want the social intelligence report for?",
-            reply_markup=_ticker_kbd("social"),
+            reply_markup=await _ticker_kbd("social"),
         )
         return
     ticker = context.args[0].upper()
@@ -307,7 +340,7 @@ async def cmd_political(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text(
             "Which stock do you want political signals for?",
-            reply_markup=_ticker_kbd("political"),
+            reply_markup=await _ticker_kbd("political"),
         )
         return
     ticker = context.args[0].upper()
@@ -368,7 +401,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not wl:
         await update.message.reply_text(
             "Your watchlist is empty.\n\nTap a stock below to add it:",
-            reply_markup=_ticker_kbd("watchlist_add"),
+            reply_markup=await _ticker_kbd("watchlist_add"),
         )
         return
 
@@ -576,7 +609,7 @@ async def cmd_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="Which stock to add?",
-                reply_markup=_ticker_kbd("watchlist_add"),
+                reply_markup=await _ticker_kbd("watchlist_add"),
             )
         else:
             ticker = value.upper()
