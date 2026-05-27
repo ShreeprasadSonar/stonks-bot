@@ -5,12 +5,15 @@ Closing report: day summary with gainers/losers + sentiment.
 All times in Central Time (Chicago).
 """
 import asyncio
+import html as _html
 import os
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram import Bot
 from telegram.constants import ParseMode
+
+_e = _html.escape   # HTML-escape helper for dynamic strings
 
 from config import TELEGRAM_TOKEN, SECTORS
 from fetcher import get_top_movers, get_stock_info
@@ -82,11 +85,11 @@ async def send_morning_brief(bot: Bot):
             from reddit import get_yahoo_trending
             trending = get_yahoo_trending()
             if trending:
-                ctx_msg += f"\n🔥 *Trending on Yahoo Finance:*\n   {', '.join(trending[:10])}\n   _Most-searched stocks right now_"
+                ctx_msg += f"\n🔥 <b>Trending on Yahoo Finance:</b>\n   {', '.join(trending[:10])}\n   <i>Most-searched stocks right now</i>"
         except Exception:
             pass
 
-        await bot.send_message(chat_id=CHAT_ID, text=ctx_msg, parse_mode=ParseMode.MARKDOWN)
+        await bot.send_message(chat_id=CHAT_ID, text=ctx_msg, parse_mode=ParseMode.HTML)
         logger.info("Morning brief msg 0 sent (market context)")
         await asyncio.sleep(1)
     except Exception as e:
@@ -103,18 +106,18 @@ async def send_morning_brief(bot: Bot):
         await bot.send_message(
             chat_id=CHAT_ID,
             text="⚠️ Morning brief: Could not fetch market data. Yahoo Finance may be rate-limiting.",
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.HTML
         )
         return
 
     # ── MESSAGE 1: Overview + Top Movers ─────────────────────────────────
     msg1_lines = [
-        f"🌅 *MORNING MARKET BRIEF*",
+        "🌅 <b>MORNING MARKET BRIEF</b>",
         f"📅 {ct_date()}  |  {ct_now()}",
         "━━━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🔥 *TOP PRE-MARKET MOVERS*",
-        "_Stocks moving the most before market opens_",
+        "🔥 <b>TOP PRE-MARKET MOVERS</b>",
+        "<i>Stocks moving the most before market opens</i>",
         "",
     ]
 
@@ -124,7 +127,7 @@ async def send_morning_brief(bot: Bot):
         vol_flag = "  ⚡" if m["volume_ratio"] > 2 else ""
         tech     = get_technical_signals(m["history"])
         rsi_str  = f"  |  {_rsi_badge(tech['rsi'])}" if tech["rsi"] else ""
-        msg1_lines.append(f"  {emoji} *{m['ticker']}*  {m['change_pct']:+.2f}%{vol_flag}{rsi_str}")
+        msg1_lines.append(f"  {emoji} <b>{m['ticker']}</b>  {m['change_pct']:+.2f}%{vol_flag}{rsi_str}")
 
     # 52W high breakouts
     highs, lows = [], []
@@ -142,16 +145,16 @@ async def send_morning_brief(bot: Bot):
     if highs:
         msg1_lines += [
             "",
-            f"🚀 *Near 52-Week High Breakouts:*",
+            "🚀 <b>Near 52-Week High Breakouts:</b>",
             f"   {', '.join(highs[:4])}",
-            "   _Stocks near their strongest point in a year_",
+            "   <i>Stocks near their strongest point in a year</i>",
         ]
     if lows:
         msg1_lines += [
             "",
-            f"🟢 *Oversold Opportunities (RSI < 32):*",
+            "🟢 <b>Oversold Opportunities (RSI &lt; 32):</b>",
             f"   {', '.join(lows[:4])}",
-            "   _Heavy selling may have overextended — bounce candidates_",
+            "   <i>Heavy selling may have overextended — bounce candidates</i>",
         ]
 
     # Earnings warnings
@@ -171,9 +174,9 @@ async def send_morning_brief(bot: Bot):
     if earnings_soon:
         msg1_lines += [
             "",
-            "⚠️ *Earnings Within 2 Weeks:*",
+            "⚠️ <b>Earnings Within 2 Weeks:</b>",
             f"   {', '.join(earnings_soon[:5])}",
-            "   _Price can swing ±15%+ on earnings day — manage risk!_",
+            "   <i>Price can swing ±15%+ on earnings day — manage risk!</i>",
         ]
 
     msg1_lines += [
@@ -183,23 +186,23 @@ async def send_morning_brief(bot: Bot):
     ]
 
     await bot.send_message(
-        chat_id=CHAT_ID, text="\n".join(msg1_lines), parse_mode=ParseMode.MARKDOWN
+        chat_id=CHAT_ID, text="\n".join(msg1_lines), parse_mode=ParseMode.HTML
     )
     logger.info("Morning brief msg 1 sent (movers)")
 
     # ── MESSAGE 2: News + Reddit per sector ──────────────────────────────
     await asyncio.sleep(1)
     msg2_lines = [
-        "📰 *TODAY'S KEY NEWS + REDDIT BUZZ*",
+        "📰 <b>TODAY'S KEY NEWS + REDDIT BUZZ</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        "_What people are talking about this morning_",
+        "<i>What people are talking about this morning</i>",
         "",
     ]
 
     # Scan top 2 focus tickers per sector
     for sector, tickers in SECTORS.items():
         focus = [t for t in MORNING_FOCUS if t in tickers][:2] or tickers[:2]
-        sector_lines = [f"*{sector}*"]
+        sector_lines = [f"<b>{sector}</b>"]
         has_content = False
 
         for ticker in focus:
@@ -209,11 +212,11 @@ async def send_morning_brief(bot: Bot):
 
             top_headline = ""
             if articles:
-                top_headline = articles[0]["title"][:75]
+                top_headline = _e(articles[0]["title"][:75])
 
             if top_headline or reddit:
                 has_content = True
-                sector_lines.append(f"  *{ticker}* — {sentiment['label']}")
+                sector_lines.append(f"  <b>{ticker}</b> — {sentiment['label']}")
                 if top_headline:
                     sector_lines.append(f"    📰 {top_headline}…")
                 if reddit:
@@ -229,14 +232,14 @@ async def send_morning_brief(bot: Bot):
     ]
 
     await bot.send_message(
-        chat_id=CHAT_ID, text="\n".join(msg2_lines), parse_mode=ParseMode.MARKDOWN
+        chat_id=CHAT_ID, text="\n".join(msg2_lines), parse_mode=ParseMode.HTML
     )
     logger.info("Morning brief msg 2 sent (news + reddit)")
 
     # ── MESSAGE 2b: Social Signals Block (Reddit hot + Congress trades) ───
     await asyncio.sleep(1)
     social_lines = [
-        "📡 *SOCIAL & POLITICAL PULSE*",
+        "📡 <b>SOCIAL &amp; POLITICAL PULSE</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
         "",
     ]
@@ -245,10 +248,10 @@ async def send_morning_brief(bot: Bot):
         from social import get_reddit_hot_tickers
         hot = get_reddit_hot_tickers(limit=8)
         if hot:
-            social_lines.append("💬 *Reddit Buzz — most-mentioned right now:*")
+            social_lines.append("💬 <b>Reddit Buzz — most-mentioned right now:</b>")
             for h in hot[:5]:
-                social_lines.append(f"  • *{h['ticker']}* — {h['mentions']} mentions")
-            social_lines.append("  _High Reddit activity = retail sentiment moving_")
+                social_lines.append(f"  • <b>{h['ticker']}</b> — {h['mentions']} mentions")
+            social_lines.append("  <i>High Reddit activity = retail sentiment moving</i>")
             social_lines.append("")
     except Exception as e:
         logger.warning(f"Reddit hot tickers failed: {e}")
@@ -262,11 +265,11 @@ async def send_morning_brief(bot: Bot):
             for tr in trades:
                 congress_hits.append((ticker, tr))
         if congress_hits:
-            social_lines.append("🏛️ *Congressional Trades — last 7 days:*")
+            social_lines.append("🏛️ <b>Congressional Trades — last 7 days:</b>")
             for ticker, tr in congress_hits[:6]:
                 emoji = "🟢" if "purch" in tr["type"].lower() or "buy" in tr["type"].lower() else "🔴"
-                social_lines.append(f"  {emoji} *{ticker}* — {tr['name']} ({tr['chamber']}) {tr['type']} · {tr['date']}")
-            social_lines.append("  _Congress trades are public record — net buying is bullish signal_")
+                social_lines.append(f"  {emoji} <b>{ticker}</b> — {_e(tr['name'])} ({tr['chamber']}) {_e(tr['type'])} · {tr['date']}")
+            social_lines.append("  <i>Congress trades are public record — net buying is bullish signal</i>")
             social_lines.append("")
     except Exception as e:
         logger.warning(f"Congress trades failed: {e}")
@@ -277,7 +280,7 @@ async def send_morning_brief(bot: Bot):
             "💡 /social TICKER — full social intelligence report",
         ]
         await bot.send_message(
-            chat_id=CHAT_ID, text="\n".join(social_lines), parse_mode=ParseMode.MARKDOWN
+            chat_id=CHAT_ID, text="\n".join(social_lines), parse_mode=ParseMode.HTML
         )
         logger.info("Morning brief social block sent")
 
@@ -289,24 +292,24 @@ async def send_morning_brief(bot: Bot):
         hot_themes    = [t for t in theme_results if t["score"] >= 15][:4]
         if hot_themes:
             th_lines = [
-                "📡 *MARKET NARRATIVE TRACKER*",
-                "_What institutional & retail investors are focusing on today_",
+                "📡 <b>MARKET NARRATIVE TRACKER</b>",
+                "<i>What institutional &amp; retail investors are focusing on today</i>",
                 "━━━━━━━━━━━━━━━━━━━━━━",
                 "",
             ]
             for th in hot_themes:
                 tickers_str = "  ".join(th["tickers"][:5])
-                th_lines.append(f"{th['momentum']}  *{th['name']}*")
+                th_lines.append(f"{th['momentum']}  <b>{_e(th['name'])}</b>")
                 th_lines.append(f"   Plays: {tickers_str}")
                 if th["top_headlines"]:
-                    th_lines.append(f"   📰 {th['top_headlines'][0][:85]}…")
+                    th_lines.append(f"   📰 <i>{_e(th['top_headlines'][0][:85])}</i>…")
                 th_lines.append("")
             th_lines += [
                 "━━━━━━━━━━━━━━━━━━━━━━",
                 "💡 Tap 📡 Narrative Tracker in /market to see full theme analysis",
             ]
             await bot.send_message(
-                chat_id=CHAT_ID, text="\n".join(th_lines), parse_mode=ParseMode.MARKDOWN
+                chat_id=CHAT_ID, text="\n".join(th_lines), parse_mode=ParseMode.HTML
             )
             logger.info("Morning brief theme block sent")
     except Exception as e:
@@ -315,7 +318,7 @@ async def send_morning_brief(bot: Bot):
     # ── MESSAGE 3: What to watch + sector overview ────────────────────────
     await asyncio.sleep(1)
     msg3_lines = [
-        "🧠 *WHAT TO WATCH TODAY*",
+        "🧠 <b>WHAT TO WATCH TODAY</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
         "",
     ]
@@ -340,7 +343,7 @@ async def send_morning_brief(bot: Bot):
 
         if reasons:
             emoji = "📈" if m["change_pct"] >= 0 else "📉"
-            watchlist.append(f"  {emoji} *{m['ticker']}* — {', '.join(reasons[:2])}")
+            watchlist.append(f"  {emoji} <b>{m['ticker']}</b> — {', '.join(reasons[:2])}")
 
     if watchlist:
         for w in watchlist[:6]:
@@ -350,7 +353,7 @@ async def send_morning_brief(bot: Bot):
 
     msg3_lines += [
         "",
-        "📊 *SECTOR SNAPSHOT*",
+        "📊 <b>SECTOR SNAPSHOT</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
     ]
     for sector, tickers in SECTORS.items():
@@ -362,7 +365,7 @@ async def send_morning_brief(bot: Bot):
         best    = max(sector_data, key=lambda x: x["change_pct"])
         worst   = min(sector_data, key=lambda x: x["change_pct"])
         msg3_lines.append(
-            f"  {trend} *{sector}* avg {avg_chg:+.1f}% — "
+            f"  {trend} <b>{sector}</b> avg {avg_chg:+.1f}% — "
             f"Best: {best['ticker']} {best['change_pct']:+.1f}%  |  "
             f"Worst: {worst['ticker']} {worst['change_pct']:+.1f}%"
         )
@@ -370,12 +373,12 @@ async def send_morning_brief(bot: Bot):
     msg3_lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        "📅 *MACRO CALENDAR — TODAY'S EVENTS:*",
+        "📅 <b>MACRO CALENDAR — TODAY'S EVENTS:</b>",
         "",
     ]
     macro_events = get_macro_calendar()
     for ev in macro_events:
-        msg3_lines.append(f"   • {ev}")
+        msg3_lines.append(f"   • {_e(ev)}")
 
     msg3_lines += [
         "",
@@ -386,7 +389,7 @@ async def send_morning_brief(bot: Bot):
     ]
 
     await bot.send_message(
-        chat_id=CHAT_ID, text="\n".join(msg3_lines), parse_mode=ParseMode.MARKDOWN
+        chat_id=CHAT_ID, text="\n".join(msg3_lines), parse_mode=ParseMode.HTML
     )
     logger.info("Morning brief complete ✅")
 
@@ -405,42 +408,42 @@ async def send_closing_report(bot: Bot):
     losers  = sorted(movers, key=lambda x: x["change_pct"])[:3]
 
     lines = [
-        f"📊 *MARKET CLOSE REPORT*",
+        "📊 <b>MARKET CLOSE REPORT</b>",
         f"📅 {ct_date()}  |  {ct_now()}",
         "━━━━━━━━━━━━━━━━━━━━━━",
         "",
-        "🏆 *Top Gainers Today:*",
-        "_Stocks that moved up most — look for volume confirmation_",
+        "🏆 <b>Top Gainers Today:</b>",
+        "<i>Stocks that moved up most — look for volume confirmation</i>",
         "",
     ]
     for m in gainers:
         tech     = get_technical_signals(m["history"])
         vol_note = "  ⚡ Vol spike!" if m["volume_ratio"] > 2 else ""
         rsi_note = f"  RSI {tech['rsi']}" if tech["rsi"] else ""
-        lines.append(f"  📈 *{m['ticker']}*  +{m['change_pct']:.2f}%{vol_note}{rsi_note}")
+        lines.append(f"  📈 <b>{m['ticker']}</b>  +{m['change_pct']:.2f}%{vol_note}{rsi_note}")
 
     lines += [
         "",
-        "📉 *Notable Losers:*",
-        "_Check news to understand why — opportunity or warning?_",
+        "📉 <b>Notable Losers:</b>",
+        "<i>Check news to understand why — opportunity or warning?</i>",
         "",
     ]
     for m in losers:
         if m["change_pct"] < 0:
             articles  = get_news(m["ticker"], limit=3)
-            top_news  = articles[0]["title"][:60] if articles else "No major news found"
-            lines.append(f"  📉 *{m['ticker']}*  {m['change_pct']:.2f}%")
+            top_news  = _e(articles[0]["title"][:60]) if articles else "No major news found"
+            lines.append(f"  📉 <b>{m['ticker']}</b>  {m['change_pct']:.2f}%")
             lines.append(f"     📰 {top_news}…")
 
     # Sector performance
-    lines += ["", "📊 *Sector Performance:*", ""]
+    lines += ["", "📊 <b>Sector Performance:</b>", ""]
     for sector, tickers in SECTORS.items():
         sector_data = [m for m in movers if m["ticker"] in tickers]
         if not sector_data:
             continue
         avg = sum(m["change_pct"] for m in sector_data) / len(sector_data)
         trend = "📈" if avg >= 0 else "📉"
-        lines.append(f"  {trend} *{sector}:* avg {avg:+.1f}%")
+        lines.append(f"  {trend} <b>{sector}:</b> avg {avg:+.1f}%")
 
     # Social sentiment for top movers
     try:
@@ -451,9 +454,9 @@ async def send_closing_report(bot: Bot):
             sig = get_finviz_signals(ticker)
             if sig.get("ratings"):
                 latest = sig["ratings"][0]
-                finviz_lines.append(f"  *{ticker}* — {latest.get('action', '')} {latest.get('rating', '')} @ ${latest.get('price_target', '?')} ({latest.get('firm', '')})")
+                finviz_lines.append(f"  <b>{ticker}</b> — {_e(latest.get('action', ''))} {_e(latest.get('rating', ''))} @ ${latest.get('price_target', '?')} ({_e(latest.get('firm', ''))})")
         if finviz_lines:
-            lines += ["", "🔬 *Analyst Actions — Today's Movers:*"] + finviz_lines
+            lines += ["", "🔬 <b>Analyst Actions — Today's Movers:</b>"] + finviz_lines
     except Exception:
         pass
 
@@ -464,7 +467,7 @@ async def send_closing_report(bot: Bot):
         "💡 /market — see full momentum + sector view",
     ]
     await bot.send_message(
-        chat_id=CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.MARKDOWN
+        chat_id=CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML
     )
     logger.info("Closing report sent ✅")
 
@@ -474,21 +477,21 @@ async def send_weekly_deepdive(bot: Bot):
     movers = get_top_movers(all_tickers)
 
     lines = [
-        f"📅 *WEEKLY DEEP-DIVE*",
+        "📅 <b>WEEKLY DEEP-DIVE</b>",
         f"Week ending {ct_date()}",
         "━━━━━━━━━━━━━━━━━━━━━━",
         "",
-        "📊 *Weekly Performance by Sector:*",
+        "📊 <b>Weekly Performance by Sector:</b>",
         "",
     ]
     for sector, tickers in SECTORS.items():
-        lines.append(f"*{sector}*")
+        lines.append(f"<b>{sector}</b>")
         sector_movers = [m for m in movers if m["ticker"] in tickers]
         for m in sorted(sector_movers, key=lambda x: x["change_pct"], reverse=True):
             emoji = "📈" if m["change_pct"] >= 0 else "📉"
             tech  = get_technical_signals(m["history"])
             rsi   = f"  RSI {tech['rsi']}" if tech["rsi"] else ""
-            lines.append(f"  {emoji} *{m['ticker']}*  {m['change_pct']:+.2f}%{rsi}")
+            lines.append(f"  {emoji} <b>{m['ticker']}</b>  {m['change_pct']:+.2f}%{rsi}")
         lines.append("")
 
     lines += [
@@ -496,7 +499,7 @@ async def send_weekly_deepdive(bot: Bot):
         "💡 /analyze TICKER — full report on any stock above",
     ]
     await bot.send_message(
-        chat_id=CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.MARKDOWN
+        chat_id=CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML
     )
 
 
