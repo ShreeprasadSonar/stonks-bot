@@ -210,23 +210,22 @@ def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, 
     else:
         lines.append("   No news found today")
 
-    # ── StockTwits ────────────────────────────────────────────
+    # ── Yahoo Social Interest ─────────────────────────────────
     if reddit and reddit.get("available"):
         lines += ["", DIV]
-        if reddit.get("mentions", 0) > 0:
-            watchers = reddit.get("watchers", 0)
-            watcher_str = f"  ·  👀 <b>{watchers:,}</b> watching" if watchers else ""
+        if reddit.get("mentions", 0) > 0 or reddit.get("is_trending"):
+            rank_str = f" (#{reddit['trend_rank']} trending)" if reddit.get("trend_rank") else ""
             lines += [
-                f"📱 <b>STOCKTWITS</b>  ·  {_e(reddit['hype_label'])}",
+                f"📊 <b>SOCIAL INTEREST</b>  ·  {_e(reddit['hype_label'])}",
                 "",
-                f"   Mood: {_e(reddit['sentiment'])}{watcher_str}",
-                f"   Recent messages: <b>{reddit['mentions']}</b>",
-                f"   <i>Tap to view on StockTwits →</i> "
-                f'<a href="https://stocktwits.com/symbol/{ticker}">stocktwits.com/{ticker}</a>',
+                f"   {_e(reddit['sentiment'])}{rank_str}",
+                f"   {_e(reddit.get('note', ''))}",
+                f'   <a href="https://finance.yahoo.com/quote/{ticker}">View on Yahoo Finance →</a>',
             ]
         else:
             lines += [
-                "📱 <b>STOCKTWITS</b>  ·  🔇 Quiet — no recent activity",
+                f"📊 <b>SOCIAL INTEREST</b>  ·  🔇 Not trending today",
+                f'   <a href="https://finance.yahoo.com/quote/{ticker}">View on Yahoo Finance →</a>',
             ]
 
     # ── Investment Score ──────────────────────────────────────
@@ -325,16 +324,17 @@ EXPLAIN_DICT = {
         "that's a high-confidence oversold signal. Both indicators agreeing = stronger signal."
     ),
     "reddit": (
-        "📱 <b>StockTwits Social Sentiment</b>\n\n"
-        "<b>Simple version:</b> How much retail traders on StockTwits are talking about a stock.\n"
-        "StockTwits is finance-only — every post is about stocks, so it's a cleaner signal than Reddit.\n\n"
-        "• <b>Extreme Hype</b> 🚀 = High message volume — strong retail interest\n"
-        "• <b>High Buzz</b> 🔥 = Active discussion — worth monitoring\n"
+        "📊 <b>Social Interest — Yahoo Finance Trending</b>\n\n"
+        "<b>Simple version:</b> Is this stock one of the most-searched tickers on Yahoo Finance right now?\n\n"
+        "• <b>Trending #1–3</b> 🚀 = Extremely high retail attention today\n"
+        "• <b>Trending #4–10</b> 🔥 = High interest — many people researching this stock\n"
         "• <b>Moderate</b> 💬 = Normal chatter — not a strong signal alone\n"
-        "• <b>Low/None</b> 🔇 = Quiet — institutional action may dominate\n\n"
-        "📌 <b>Sentiment labels:</b> Traders self-tag posts as Bullish 👍 or Bearish 👎.\n"
-        "When 65%+ tag Bullish with high activity — that's meaningful retail conviction.\n\n"
-        "⚠️ <b>Warning:</b> Social hype moves fast. Always combine with RSI + fundamentals before acting."
+        "• <b>Not trending</b> 🔇 = Below the radar today\n\n"
+        "📌 <b>Why Yahoo trending matters:</b>\n"
+        "   When retail investors research a stock, they often search Yahoo Finance first.\n"
+        "   A spike in trending rank often precedes a price move.\n"
+        "   Combined with Bullish news sentiment = strong retail momentum signal.\n\n"
+        "⚠️ <b>Warning:</b> Trending ≠ good investment. Always check RSI + fundamentals too."
     ),
 }
 
