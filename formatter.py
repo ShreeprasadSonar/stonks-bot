@@ -428,8 +428,8 @@ def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, 
         lines += [
             "",
             f"🎯 <b>Key Levels</b>  <i>(20-day)</i>",
-            f"   🟢 Support    <b>${tech['support']}</b>  <i>{tech['pct_to_support']:+.1f}% below</i>",
-            f"   🔴 Resistance <b>${tech['resistance']}</b>  <i>{tech['pct_to_resist']:+.1f}% above</i>",
+            f"   🟢 Support    <b><u>${tech['support']}</u></b>  <i>{tech['pct_to_support']:+.1f}% below</i>",
+            f"   🔴 Resistance <b><u>${tech['resistance']}</u></b>  <i>{tech['pct_to_resist']:+.1f}% above</i>",
         ]
         if tech.get("atr"):
             sl = round(price - tech["atr"] * 1.5, 2)
@@ -490,10 +490,9 @@ def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, 
             source = _e(n.get("source", ""))
             source_str = f"  <i>{source}</i>" if source else ""
             if url:
-                lines.append(f'   • <a href="{url}">{title}</a>{source_str}')
+                lines.append(f'<blockquote>• <a href="{url}">{title}</a>{source_str}\n  ↳ {label}</blockquote>')
             else:
-                lines.append(f"   • {title}{source_str}")
-            lines.append(f"     ↳ {label}")
+                lines.append(f"<blockquote>• {title}{source_str}\n  ↳ {label}</blockquote>")
     else:
         lines.append("   No news found today")
 
@@ -523,7 +522,7 @@ def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, 
         f"🎯 <b>SCORE  {composite}/100</b>",
         f"   {score_bar}  {score_label(composite)}",
         "",
-        f"   <i>{_e(score_summary(composite, stock['ticker'], tech, fund, sentiment))}</i>",
+        f"<blockquote>{_e(score_summary(composite, stock['ticker'], tech, fund, sentiment))}</blockquote>",
         DIV,
         f"<i>/explain rsi  ·  /explain score  ·  /social {stock['ticker']}</i>",
     ]
