@@ -1,205 +1,245 @@
 """
-Social sentiment via StockTwits — no API key or credentials required.
-Replaces the previous Reddit/PRAW implementation.
-StockTwits is finance-focused social media: every post is about stocks.
+Social sentiment via Yahoo Finance Trending — no API key, no credentials.
+Replaces StockTwits (403) and Reddit (requires credentials).
+
+Yahoo Finance Trending shows what tickers retail investors are actively
+searching and watching right now — a reliable free proxy for social sentiment.
 """
 import logging
 import requests
+import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
-BULLISH_WORDS = [
-    "buy", "buying", "bull", "bullish", "moon", "calls", "long",
-    "breakout", "undervalued", "upside", "squeeze", "strong", "upgrade",
-    "accumulate", "hold", "rocket", "run", "bounce", "bottom",
-]
-BEARISH_WORDS = [
-    "sell", "selling", "bear", "bearish", "puts", "short", "crash", "dump",
-    "overvalued", "avoid", "warning", "downgrade", "weak", "drop",
-    "bubble", "falling", "loss", "top", "resist",
-]
+YAHOO_TRENDING_URL = "https://query1.finance.yahoo.com/v1/finance/trending/US"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+}
+
+
+def get_trending_tickers(limit: int = 20) -> list:
+    """
+    Fetch Yahoo Finance trending tickers for the US market.
+    Free, no API key, refreshes during market hours.
+    """
+    try:
+        resp = requests.get(YAHOO_TRENDING_URL, headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            logger.warning(f"Yahoo Trending returned HTTP {resp.status_code}")
+            return []
+        data   = resp.json()
+        quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
+        tickers = [q["symbol"] for q in quotes[:limit] if q.get("symbol")]
+        logger.info(f"Yahoo Trending: {len(tickers)} tickers — {tickers[:8]}")
+        return tickers
+    except Exception as e:
+        logger.error(f"Yahoo Trending fetch failed: {e}")
+        return []
 
 
 def get_reddit_sentiment(ticker: str, limit: int = 30) -> dict:
     """
-    Fetch StockTwits stream for ticker.
-    Returns same dict shape as the old Reddit version so all callers work unchanged.
-    No API key needed — free public endpoint.
+    Public sentiment proxy using Yahoo Finance Trending + volume + news.
+    Same return dict shape as old Reddit/StockTwits — all callers unchanged.
+
+    Scoring:
+    - Yahoo Trending rank:  rank 1-5=40pts, 6-15=25pts, 16-50=15pts, not=0
+    - Volume ratio:         >3x=30pts, >2x=20pts, >1.5x=10pts, else=0
+    - News sentiment:       positive=20pts, neutral=10pts, negative=0pts
     """
     try:
-        url  = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
-        resp = requests.get(url, timeout=10, headers={"User-Agent": "StockBot/1.0"})
+        trending    = get_trending_tickers(50)
+        in_trending = ticker.upper() in [t.upper() for t in trending]
+        trend_rank  = None
+        if in_trending:
+            for i, t in enumerate(trending):
+                if t.upper() == ticker.upper():
+                    trend_rank = i + 1
+                    break
 
-        if resp.status_code == 404:
-            return _no_data(ticker, "Ticker not found on StockTwits")
-        if resp.status_code == 429:
-            return _no_data(ticker, "StockTwits rate limit — try again in a minute")
-        if resp.status_code != 200:
-            return _no_data(ticker, f"StockTwits returned HTTP {resp.status_code}")
+        try:
+            hist = yf.download(ticker, period="5d", auto_adjust=True,
+                               progress=False, timeout=10)
+            if not hist.empty:
+                if hasattr(hist.columns, "levels"):
+                    hist.columns = hist.columns.get_level_values(0)
+                avg_vol   = float(hist["Volume"].iloc[:-1].mean())
+                today_vol = float(hist["Volume"].iloc[-1])
+                vol_ratio = round(today_vol / avg_vol, 2) if avg_vol > 0 else 1.0
+            else:
+                vol_ratio = 1.0
+        except Exception:
+            vol_ratio = 1.0
 
-        data      = resp.json()
-        messages  = data.get("messages", [])
-        symbol    = data.get("symbol", {})
+        try:
+            from news import get_news
+            from sentiment import score_news
+            articles   = get_news(ticker, limit=10)
+            news_sent  = score_news(articles)
+            news_score = news_sent["score"]
+            news_label = news_sent["label"]
+            top_news   = news_sent.get("scored", [])[:3]
+        except Exception:
+            news_score = 0
+            news_label = "Neutral"
+            top_news   = []
 
-        if not messages:
-            return {
-                "ticker":     ticker,
-                "mentions":   0,
-                "upvotes":    0,
-                "hype_score": 0,
-                "hype_label": "🔇 No StockTwits Activity",
-                "sentiment":  "🟡 No signal",
-                "top_posts":  [],
-                "available":  True,
-                "note":       "No recent messages on StockTwits",
-                "source":     "StockTwits",
-            }
+        trend_pts = 0
+        if trend_rank:
+            if trend_rank <= 5:    trend_pts = 40
+            elif trend_rank <= 15: trend_pts = 25
+            else:                  trend_pts = 15
 
-        bull_count = 0
-        bear_count = 0
-        bull_word  = 0
-        bear_word  = 0
-        top_posts  = []
+        vol_pts    = 30 if vol_ratio >= 3 else (20 if vol_ratio >= 2 else (10 if vol_ratio >= 1.5 else 0))
+        news_pts   = int((news_score + 1) / 2 * 20)
+        hype_score = min(100, trend_pts + vol_pts + news_pts)
 
-        for msg in messages[:limit]:
-            body   = (msg.get("body") or "").lower()
-            # StockTwits has explicit sentiment labels on some posts
-            entities  = msg.get("entities", {})
-            st_sent   = msg.get("entities", {}).get("sentiment", {})
-            if isinstance(st_sent, dict):
-                basic = st_sent.get("basic", "")
-                if basic == "Bullish":
-                    bull_count += 1
-                elif basic == "Bearish":
-                    bear_count += 1
-
-            bull_word += sum(1 for w in BULLISH_WORDS if w in body)
-            bear_word += sum(1 for w in BEARISH_WORDS if w in body)
-
-            if len(top_posts) < 3:
-                likes = msg.get("likes", {}).get("total", 0)
-                top_posts.append({
-                    "title": msg.get("body", "")[:100],
-                    "score": likes,
-                    "sub":   "StockTwits",
-                    "url":   f"https://stocktwits.com/symbol/{ticker}",
-                })
-
-        total_messages = len(messages)
-        total_bull     = bull_count + bull_word
-        total_bear     = bear_count + bear_word
-
-        # Hype score: message volume (0-100)
-        hype_score = min(100, total_messages * 2)
-
-        if hype_score >= 70:
-            hype_label = "🚀 Extreme Hype"
+        if hype_score >= 65:
+            hype_label = "Trending — High Retail Activity"
         elif hype_score >= 40:
-            hype_label = "🔥 High Buzz"
-        elif hype_score >= 15:
-            hype_label = "💬 Moderate Activity"
+            hype_label = "Elevated Interest"
+        elif hype_score >= 20:
+            hype_label = "Moderate Activity"
         else:
-            hype_label = "🔇 Low Activity"
+            hype_label = "Low Retail Activity"
 
-        if total_bull > total_bear * 1.4:
-            sentiment = "🟢 Mostly Bullish"
-        elif total_bear > total_bull * 1.4:
-            sentiment = "🔴 Mostly Bearish"
+        if news_score > 0.15:
+            sentiment = "Bullish — " + news_label
+        elif news_score < -0.15:
+            sentiment = "Bearish — " + news_label
         else:
-            sentiment = "🟡 Mixed Sentiment"
+            sentiment = "Neutral — " + news_label
 
-        # StockTwits explicit labels are more reliable — override if available
-        if bull_count + bear_count >= 3:
-            bull_pct = bull_count / (bull_count + bear_count)
-            if bull_pct >= 0.65:
-                sentiment = f"🟢 Bullish ({bull_count}👍 vs {bear_count}👎 tagged)"
-            elif bull_pct <= 0.35:
-                sentiment = f"🔴 Bearish ({bear_count}👎 vs {bull_count}👍 tagged)"
+        top_posts = [
+            {
+                "title": n.get("title", "")[:100],
+                "score": 0,
+                "sub":   n.get("source", "News"),
+                "url":   n.get("link", ""),
+            }
+            for n in top_news
+        ]
 
-        # Also pull StockTwits watchlist count if available
-        watchers = symbol.get("watchlist_count", 0)
+        trend_note = (
+            f"#{trend_rank} on Yahoo Finance Trending right now"
+            if in_trending and trend_rank
+            else "Not currently on Yahoo Finance Trending list"
+        )
 
         logger.info(
-            f"[{ticker}] StockTwits: {total_messages} msgs, "
-            f"bull={total_bull}, bear={total_bear}, watchers={watchers:,}"
+            f"[{ticker}] Yahoo social: trending={in_trending} rank={trend_rank}, "
+            f"vol_ratio={vol_ratio}, hype={hype_score}"
         )
 
         return {
-            "ticker":     ticker,
-            "mentions":   total_messages,
-            "upvotes":    watchers,        # repurposed field: watchlist count
-            "hype_score": hype_score,
-            "hype_label": hype_label,
-            "sentiment":  sentiment,
-            "top_posts":  top_posts,
-            "available":  True,
-            "note":       f"{watchers:,} users watch {ticker} on StockTwits",
-            "source":     "StockTwits",
-            "watchers":   watchers,
+            "ticker":        ticker,
+            "mentions":      trend_rank or 0,
+            "upvotes":       len(trending),
+            "hype_score":    hype_score,
+            "hype_label":    hype_label,
+            "sentiment":     sentiment,
+            "top_posts":     top_posts,
+            "available":     True,
+            "note":          trend_note,
+            "source":        "Yahoo Finance",
+            "in_trending":   in_trending,
+            "trend_rank":    trend_rank,
+            "vol_ratio":     vol_ratio,
+            "trending_list": trending[:10],
         }
 
     except Exception as e:
-        logger.error(f"[{ticker}] StockTwits fetch error: {e}")
+        logger.error(f"[{ticker}] Yahoo sentiment fetch error: {e}")
         return _no_data(ticker, str(e))
 
 
+def get_market_trending_summary() -> str:
+    """HTML-formatted trending list for morning brief."""
+    import html as _h
+    trending = get_trending_tickers(15)
+    if not trending:
+        return "   No trending data available"
+    lines = [f"   {i}. <b>{_h.escape(t)}</b>" for i, t in enumerate(trending[:10], 1)]
+    return "\n".join(lines)
+
+
 def format_reddit_report(ticker: str, data: dict) -> str:
-    """Format StockTwits sentiment into HTML for Telegram."""
+    """Format Yahoo Finance social sentiment into HTML for Telegram."""
     import html as _h
     t = _h.escape(ticker)
 
     if not data.get("available"):
         return (
-            f"📱 <b>STOCKTWITS — {t}</b>\n"
-            f"   ⚠️ {_h.escape(data.get('note', 'Unavailable'))}\n"
+            f"<b>SOCIAL SENTIMENT — {t}</b>\n"
+            f"   {_h.escape(data.get('note', 'Unavailable'))}\n"
         )
 
+    in_trending   = data.get("in_trending", False)
+    trend_rank    = data.get("trend_rank")
+    vol_ratio     = data.get("vol_ratio", 1.0)
+    trending_list = data.get("trending_list", [])
+
+    trend_str = (
+        f"#​{trend_rank} on Yahoo Finance Trending"
+        if in_trending and trend_rank
+        else "Not on Yahoo Finance Trending today"
+    )
+
     lines = [
-        f"📱 <b>STOCKTWITS — {t}</b>",
+        f"<b>RETAIL SENTIMENT — {t}</b>",
+        f"<i>Yahoo Finance Trending + Volume + News</i>",
         "",
+        f"   {trend_str}",
         f"   Activity: <b>{_h.escape(data['hype_label'])}</b>",
-        f"   Mood: {_h.escape(data['sentiment'])}",
-        f"   Recent messages: <b>{data['mentions']}</b>",
+        f"   News Mood: {_h.escape(data['sentiment'])}",
+        f"   Volume: <b>{vol_ratio}x</b> normal  <i>(high = people acting on it)</i>",
     ]
 
-    watchers = data.get("watchers", 0)
-    if watchers:
-        lines.append(f"   👀 Watchlist: <b>{watchers:,}</b> traders following this stock")
+    if trending_list:
+        lines += [
+            "",
+            "<b>Today's Top 10 Yahoo Trending:</b>",
+            "   " + "  |  ".join(f"<b>{_h.escape(tk)}</b>" for tk in trending_list[:10]),
+        ]
+
+    if data.get("top_posts"):
+        lines += ["", "<b>Related News:</b>"]
+        for p in data["top_posts"]:
+            title   = _h.escape(p["title"][:80])
+            url     = p.get("url", "")
+            src     = _h.escape(p.get("sub", ""))
+            src_str = f"  <i>{src}</i>" if src else ""
+            if url:
+                lines.append(f'   • <a href="{url}">{title}</a>{src_str}')
+            else:
+                lines.append(f"   • {title}{src_str}")
 
     lines += [
         "",
-        "🧠 <b>What this means:</b>",
-        "   <i>StockTwits is finance-only social media — pure trader sentiment.</i>",
-        "   <i>Bullish/Bearish labels are self-reported by traders posting.</i>",
-        "   <i>High activity + Bullish mood = strong retail conviction.</i>",
-        "   <i>Always combine with RSI + news before deciding.</i>",
+        "<b>What this means:</b>",
+        "   <i>Yahoo Trending = stocks retail investors are actively searching.</i>",
+        "   <i>High volume ratio = people are acting, not just watching.</i>",
+        "   <i>Always combine with RSI + technicals before investing.</i>",
     ]
-
-    if data.get("top_posts"):
-        lines += ["", "💬 <b>Recent Posts:</b>"]
-        for p in data["top_posts"]:
-            likes_str = f" ({p['score']} ❤️)" if p["score"] else ""
-            url = p.get("url", "")
-            title = _h.escape(p["title"][:80])
-            if url:
-                lines.append(f'   • <a href="{url}">{title}</a>…{likes_str}')
-            else:
-                lines.append(f"   • {title}…{likes_str}")
 
     return "\n".join(lines)
 
 
 def _no_data(ticker: str, reason: str) -> dict:
     return {
-        "ticker":     ticker,
-        "mentions":   0,
-        "upvotes":    0,
-        "hype_score": 0,
-        "hype_label": "N/A",
-        "sentiment":  "N/A",
-        "top_posts":  [],
-        "available":  False,
-        "note":       reason,
-        "source":     "StockTwits",
+        "ticker":        ticker,
+        "mentions":      0,
+        "upvotes":       0,
+        "hype_score":    0,
+        "hype_label":    "N/A",
+        "sentiment":     "N/A",
+        "top_posts":     [],
+        "available":     False,
+        "note":          reason,
+        "source":        "Yahoo Finance",
+        "in_trending":   False,
+        "trend_rank":    None,
+        "vol_ratio":     1.0,
+        "trending_list": [],
     }
-
