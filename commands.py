@@ -494,7 +494,7 @@ async def cmd_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id    = query.message.chat_id
     uid        = query.from_user.id
 
-    await query.edit_message_text(f"<b>{_e(value)}</b> selected", parse_mode=ParseMode.HTML)
+    await query.edit_message_text(f"Loading <b>{_e(value)}</b>…", parse_mode=ParseMode.HTML)
 
     async def send(text, mode=ParseMode.HTML):
         await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=mode)
