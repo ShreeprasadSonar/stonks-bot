@@ -79,7 +79,7 @@ async def send_morning_brief(bot: Bot):
 
         # Append Yahoo trending tickers to market context
         try:
-            from reddit import get_market_trending_summary
+            from reddit import get_yahoo_trending
             trending = get_yahoo_trending()
             if trending:
                 ctx_msg += f"\n🔥 *Trending on Yahoo Finance:*\n   {', '.join(trending[:10])}\n   _Most-searched stocks right now_"
@@ -229,6 +229,54 @@ async def send_morning_brief(bot: Bot):
     )
     logger.info("Morning brief msg 2 sent (news + reddit)")
 
+    # ── MESSAGE 2b: Social Signals Block (Reddit hot + Congress trades) ───
+    await asyncio.sleep(1)
+    social_lines = [
+        "📡 *SOCIAL & POLITICAL PULSE*",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+    # Reddit hot tickers
+    try:
+        from social import get_reddit_hot_tickers
+        hot = get_reddit_hot_tickers(limit=8)
+        if hot:
+            social_lines.append("💬 *Reddit Buzz — most-mentioned right now:*")
+            for h in hot[:5]:
+                social_lines.append(f"  • *{h['ticker']}* — {h['mentions']} mentions")
+            social_lines.append("  _High Reddit activity = retail sentiment moving_")
+            social_lines.append("")
+    except Exception as e:
+        logger.warning(f"Reddit hot tickers failed: {e}")
+
+    # Congress trades in last 7 days across all tracked tickers
+    try:
+        from social import get_congress_trades
+        congress_hits = []
+        for ticker in MORNING_FOCUS:
+            trades = get_congress_trades(ticker, recent_days=7)
+            for tr in trades:
+                congress_hits.append((ticker, tr))
+        if congress_hits:
+            social_lines.append("🏛️ *Congressional Trades — last 7 days:*")
+            for ticker, tr in congress_hits[:6]:
+                emoji = "🟢" if "purch" in tr["type"].lower() or "buy" in tr["type"].lower() else "🔴"
+                social_lines.append(f"  {emoji} *{ticker}* — {tr['name']} ({tr['chamber']}) {tr['type']} · {tr['date']}")
+            social_lines.append("  _Congress trades are public record — net buying is bullish signal_")
+            social_lines.append("")
+    except Exception as e:
+        logger.warning(f"Congress trades failed: {e}")
+
+    if len(social_lines) > 4:  # only send if we have actual content
+        social_lines += [
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            "💡 /social TICKER — full social intelligence report",
+        ]
+        await bot.send_message(
+            chat_id=CHAT_ID, text="\n".join(social_lines), parse_mode=ParseMode.MARKDOWN
+        )
+        logger.info("Morning brief social block sent")
+
     # ── MESSAGE 3: What to watch + sector overview ────────────────────────
     await asyncio.sleep(1)
     msg3_lines = [
@@ -297,10 +345,9 @@ async def send_morning_brief(bot: Bot):
     msg3_lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        "⚠️ _Not financial advice — educational only_",
         "💡 /analyze TICKER — full analyst report on any stock",
-        "💡 /trending — real-time momentum ranking",
-        "💡 /morning — trigger this brief any time | /evening — closing report",
+        "💡 /market — real-time momentum + sector view",
+        "💡 /brief morning — trigger this brief any time | /brief evening — closing report",
     ]
 
     await bot.send_message(
@@ -356,12 +403,26 @@ async def send_closing_report(bot: Bot):
         trend = "📈" if avg >= 0 else "📉"
         lines.append(f"  {trend} *{sector}:* avg {avg:+.1f}%")
 
+    # Social sentiment for top movers
+    try:
+        from social import get_finviz_signals
+        top_tickers = [m["ticker"] for m in gainers[:3]]
+        finviz_lines = []
+        for ticker in top_tickers:
+            sig = get_finviz_signals(ticker)
+            if sig.get("ratings"):
+                latest = sig["ratings"][0]
+                finviz_lines.append(f"  *{ticker}* — {latest.get('action', '')} {latest.get('rating', '')} @ ${latest.get('price_target', '?')} ({latest.get('firm', '')})")
+        if finviz_lines:
+            lines += ["", "🔬 *Analyst Actions — Today's Movers:*"] + finviz_lines
+    except Exception:
+        pass
+
     lines += [
         "",
         "━━━━━━━━━━━━━━━━━━━━━━",
         "💡 /analyze TICKER — tomorrow's opportunity analysis",
-        "💡 /trending — see full momentum table",
-        "⚠️ _Not financial advice — educational only_",
+        "💡 /market — see full momentum + sector view",
     ]
     await bot.send_message(
         chat_id=CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.MARKDOWN
@@ -394,7 +455,6 @@ async def send_weekly_deepdive(bot: Bot):
     lines += [
         "━━━━━━━━━━━━━━━━━━━━━━",
         "💡 /analyze TICKER — full report on any stock above",
-        "⚠️ _Not financial advice — educational only_",
     ]
     await bot.send_message(
         chat_id=CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.MARKDOWN
