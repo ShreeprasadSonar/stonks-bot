@@ -4,7 +4,7 @@ import os
 import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from telegram.ext import ApplicationBuilder, CommandHandler, Application
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, Application
 from telegram.constants import ParseMode
 from telegram.error import NetworkError, TimedOut
 
@@ -14,7 +14,7 @@ from commands import (
     cmd_start, cmd_help, cmd_analyze, cmd_sector,
     cmd_trending, cmd_political, cmd_explain,
     cmd_watch, cmd_unwatch, cmd_watchlist, cmd_reddit,
-    cmd_morning, cmd_evening,
+    cmd_morning, cmd_evening, cmd_button_callback,
 )
 from news import get_news
 
@@ -361,6 +361,7 @@ def main():
     app.add_handler(CommandHandler("reddit",    cmd_reddit))
     app.add_handler(CommandHandler("morning",   cmd_morning))
     app.add_handler(CommandHandler("evening",   cmd_evening))
+    app.add_handler(CallbackQueryHandler(cmd_button_callback))  # inline button taps
 
     logger.info("✅ StockBot running — listening for commands")
     app.run_polling(drop_pending_updates=True)
