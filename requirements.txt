@@ -7,3 +7,4 @@ feedparser==6.0.11
 beautifulsoup4==4.12.3
 apscheduler==3.10.4
 finnhub-python==2.4.19
+pytrends==4.9.2
