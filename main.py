@@ -6,6 +6,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, Application
 from telegram.constants import ParseMode
+from telegram.error import NetworkError, TimedOut
+
 
 from config import TELEGRAM_TOKEN, SECTORS
 from commands import (
@@ -324,7 +326,27 @@ def main():
         raise ValueError("❌ TELEGRAM_BOT_TOKEN not set. Add it as a GitHub Secret.")
 
     logger.info("Initializing StockBot...")
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(send_startup_message).build()
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .read_timeout(30)
+        .write_timeout(30)
+        .connect_timeout(30)
+        .post_init(send_startup_message)
+        .build()
+    )
+
+    # ── Error handler: silently retry transient network drops ────────────
+    async def error_handler(update, context):
+        err = context.error
+        if isinstance(err, (NetworkError, TimedOut)):
+            # GitHub Actions network blips — normal, bot auto-retries
+            logger.warning(f"⚠️ Network blip (auto-retrying): {err.__class__.__name__}")
+        else:
+            logger.error(f"❌ Unhandled error: {err}", exc_info=context.error)
+
+    app.add_error_handler(error_handler)
+    # ─────────────────────────────────────────────────────────────────────
 
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("help",      cmd_help))
