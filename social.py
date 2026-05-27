@@ -421,22 +421,20 @@ def get_full_social_report(ticker: str) -> str:
     t = _h.escape(ticker.upper())
 
     lines = [
-        f"<b>Social Intelligence — {t}</b>",
+        f"<b>📡 {t} — Social Intelligence</b>",
         "─────────────────────",
         "",
     ]
 
-    # Reddit
+    # ── Reddit Activity ───────────────────────────────────────
     reddit = get_reddit_mentions(ticker)
+    sentiment_emoji = "🟢" if "bullish" in reddit["sentiment"].lower() else ("🔴" if "bearish" in reddit["sentiment"].lower() else "🟡")
     lines += [
-        "<b>Reddit Activity</b>",
-        f"  {reddit['hype']}  ·  {reddit['mentions']} mentions in WSB/stocks/investing",
-        f"  Sentiment: {reddit['sentiment']}",
+        f"💬 <b>Reddit</b>  ·  {reddit['mentions']} mentions  ·  {sentiment_emoji} {reddit['sentiment']}",
     ]
     if reddit["top_posts"]:
-        lines.append("  <i>Top posts:</i>")
-        for p in reddit["top_posts"]:
-            title = _h.escape(p["title"][:85])
+        for p in reddit["top_posts"][:2]:
+            title = _h.escape(p["title"][:80])
             url   = p.get("url", "")
             sub   = _h.escape(p.get("sub", ""))
             if url:
@@ -445,51 +443,54 @@ def get_full_social_report(ticker: str) -> str:
                 lines.append(f"  • {title}  <i>r/{sub}</i>")
     lines.append("")
 
-    # Google Trends
+    # ── Google Trends ─────────────────────────────────────────
     trends = get_google_trends(ticker)
-    lines.append("<b>Google Trends  (7-day search interest)</b>")
     if trends.get("available"):
         lines += [
-            f"  {trends['signal']}",
-            f"  Current: <b>{trends['current']}</b>  ·  7-day avg: {trends['avg_7d']}  ·  Peak: {trends['peak_7d']}",
-            f"  Interest ratio vs baseline: <b>{trends['ratio']}x</b>",
+            f"📈 <b>Google Trends</b>  ·  {trends['signal']}",
+            f"  Interest: <b>{trends['current']}</b> vs {trends['avg_7d']} avg  ·  {trends['ratio']}x baseline",
+            "",
         ]
     else:
-        lines.append(f"  Unavailable — {_h.escape(trends.get('note', ''))}")
-    lines.append("")
+        lines += [f"📈 <b>Google Trends</b>  ·  <i>unavailable</i>", ""]
 
-    # Congress trades
+    # ── Congressional Trades ──────────────────────────────────
     trades = get_congress_trades(ticker)
-    lines.append("<b>Congressional Trades  (last 90 days)</b>")
     if trades:
         buy_cnt  = sum(1 for tr in trades if "purch" in tr["type"].lower() or "buy" in tr["type"].lower())
         sell_cnt = len(trades) - buy_cnt
-        lines.append(f"  {len(trades)} trades  ·  🟢 {buy_cnt} buys  ·  🔴 {sell_cnt} sells")
-        for tr in trades[:4]:
+        net_label = "Net buying 🟢" if buy_cnt > sell_cnt else ("Net selling 🔴" if sell_cnt > buy_cnt else "Balanced 🟡")
+        lines += [
+            f"🏛️ <b>Congress Trades</b>  ·  {net_label}  ·  {len(trades)} total",
+            f"  🟢 {buy_cnt} buys  ·  🔴 {sell_cnt} sells  (last 90 days)",
+        ]
+        for tr in trades[:3]:
             emoji = "🟢" if "purch" in tr["type"].lower() or "buy" in tr["type"].lower() else "🔴"
-            lines.append(
-                f"  {emoji} {_h.escape(tr['name'])}  ({tr['chamber']})  "
-                f"{_h.escape(tr['type'])}  ·  {tr['date']}"
-            )
+            lines.append(f"  {emoji} <b>{_h.escape(tr['name'])}</b> ({tr['chamber']})  {_h.escape(tr['type'])}  ·  {tr['date']}")
+        lines.append("")
     else:
-        lines.append("  No congressional trades in the last 90 days")
-    lines.append("")
+        lines += [f"🏛️ <b>Congress Trades</b>  ·  <i>none in last 90 days</i>", ""]
 
-    # Finviz
+    # ── Analyst Consensus ─────────────────────────────────────
     fv = get_finviz_signals(ticker)
-    lines.append("<b>Analyst Consensus  (Finviz)</b>")
     if fv.get("available"):
-        if fv.get("recom"):
-            lines.append(f"  Rating: <b>{_h.escape(fv['recom'])}</b>")
-        if fv.get("target"):
-            lines.append(f"  Price Target: <b>${_h.escape(fv['target'])}</b>")
+        recom  = _h.escape(fv.get("recom", ""))
+        target = fv.get("target", "")
+        header_parts = []
+        if recom:  header_parts.append(f"<b>{recom}</b>")
+        if target: header_parts.append(f"target ${_h.escape(target)}")
+        lines.append(f"🔬 <b>Analysts</b>  ·  {' · '.join(header_parts)}")
         for r in fv["ratings"][:3]:
-            lines.append(f"  {r['date']}  {_h.escape(r['firm'])}  {_h.escape(r['action'])}")
+            action = _h.escape(r.get("action", ""))
+            firm   = _h.escape(r.get("firm", ""))
+            pt     = r.get("price_target", "")
+            pt_str = f" → ${_h.escape(str(pt))}" if pt and pt != "0" else ""
+            lines.append(f"  {r['date']}  <b>{firm}</b>  {action}{pt_str}")
+        lines.append("")
     else:
-        lines.append("  Unavailable")
+        lines += [f"🔬 <b>Analysts</b>  ·  <i>data unavailable</i>", ""]
 
     lines += [
-        "",
         "─────────────────────",
         f"/analyze {ticker}  ·  /political {ticker}",
     ]
