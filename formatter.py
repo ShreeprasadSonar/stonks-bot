@@ -520,15 +520,12 @@ def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, 
     lines += [
         "",
         DIV,
-        f"🎯 <b>INVESTMENT SCORE: {composite}/100</b>",
-        f"   {score_bar}",
-        f"   {score_label(composite)}",
+        f"🎯 <b>SCORE  {composite}/100</b>",
+        f"   {score_bar}  {score_label(composite)}",
         "",
         f"   <i>{_e(score_summary(composite, stock['ticker'], tech, fund, sentiment))}</i>",
         DIV,
-        "",
-        "⚠️ <i>Educational only — not financial advice</i>",
-        "💡 /explain rsi  ·  /explain score  ·  /explain 52w",
+        f"<i>/explain rsi  ·  /explain score  ·  /social {stock['ticker']}</i>",
     ]
 
     return "\n".join(lines)
