@@ -235,10 +235,11 @@ def get_dynamic_tickers(base_limit: int = 20, extra_trending: int = 15) -> list:
     """
     Build a dynamic ticker list by merging:
       1. Yahoo Finance trending tickers (live retail attention)
-      2. Base SECTORS tickers (core sector anchors as fallback)
+      2. Top theme tickers (from narrative tracker — what themes are heating up)
+      3. Base SECTORS tickers (core sector anchors as fallback)
 
     Result is deduplicated, trending stocks come first so they score highest
-    in the movers sort. Caps at ~35 tickers to keep runtime reasonable.
+    in the movers sort. Caps at ~40 tickers to keep runtime reasonable.
     """
     from config import SECTORS
 
@@ -252,16 +253,23 @@ def get_dynamic_tickers(base_limit: int = 20, extra_trending: int = 15) -> list:
         if t.isalpha() and len(t) <= 5 and t.upper() not in SKIP
     ]
 
-    # Trending first, then base (deduped)
+    # Pull tickers from top 3 hot themes (fast, no Google Trends)
+    try:
+        from themes import get_top_theme_tickers
+        theme_tickers = get_top_theme_tickers(top_n_themes=3)
+    except Exception:
+        theme_tickers = []
+
+    # Trending first, then theme tickers, then base (deduped)
     seen  = set()
     final = []
-    for t in trend_clean + base_tickers:
+    for t in trend_clean + theme_tickers + base_tickers:
         if t.upper() not in seen:
             seen.add(t.upper())
             final.append(t.upper())
 
     logger.info(f"Dynamic tickers ({len(final)}): {final[:12]}… "
-                f"({len(trend_clean)} from trending, {len(base_tickers)} base)")
+                f"({len(trend_clean)} trending, {len(theme_tickers)} theme, {len(base_tickers)} base)")
     return final[:base_limit + extra_trending]   # cap at ~35
 
 
