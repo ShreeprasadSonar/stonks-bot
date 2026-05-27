@@ -50,12 +50,14 @@ def _rsi_badge(rsi) -> str:
 
 
 def _get_reddit_buzz(ticker: str) -> str:
-    """Return a short Reddit hype string, or empty if unavailable."""
+    """Return a short Yahoo trending buzz string, or empty if not trending."""
     try:
         from reddit import get_reddit_sentiment
-        r = get_reddit_sentiment(ticker, limit=25)
-        if r.get("available") and r["mentions"] > 0:
-            return f"📱 {r['hype_label']} ({r['mentions']} mentions)"
+        r = get_reddit_sentiment(ticker, limit=10)
+        if r.get("available") and r.get("in_trending"):
+            rank = r.get("trend_rank")
+            rank_str = f" #{rank}" if rank else ""
+            return f"🔥 Yahoo Trending{rank_str} — {r['hype_label']}"
     except Exception:
         pass
     return ""
@@ -74,6 +76,16 @@ async def send_morning_brief(bot: Bot):
         fear_greed  = get_fear_greed()
         sector_etfs = get_sector_etf_performance()
         ctx_msg     = format_market_context(benchmarks, fear_greed, sector_etfs)
+
+        # Append Yahoo trending tickers to market context
+        try:
+            from reddit import get_market_trending_summary
+            trending = get_yahoo_trending()
+            if trending:
+                ctx_msg += f"\n🔥 *Trending on Yahoo Finance:*\n   {', '.join(trending[:10])}\n   _Most-searched stocks right now_"
+        except Exception:
+            pass
+
         await bot.send_message(chat_id=CHAT_ID, text=ctx_msg, parse_mode=ParseMode.MARKDOWN)
         logger.info("Morning brief msg 0 sent (market context)")
         await asyncio.sleep(1)
