@@ -303,7 +303,7 @@ def format_themes_report(results: list[dict], top_n: int = 5) -> str:
 
     lines += [
         "─────────────────────",
-        "<i>Scores based on Google News + Reddit + Google Trends activity</i>",
+        "<i>Tap 📡 Narrative Tracker in /market for live updates</i>",
         "/analyze &lt;TICKER&gt; to deep-dive any stock above",
     ]
     return "\n".join(lines)
