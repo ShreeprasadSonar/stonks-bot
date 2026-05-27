@@ -157,56 +157,56 @@ def get_macro_calendar() -> list:
 
 
 def format_market_context(benchmarks: dict, fear_greed: dict, sector_etfs: dict) -> str:
-    """Format market context into a clean Telegram header for morning brief."""
+    """Format market context into a clean Telegram HTML header for morning brief."""
+    import html
     lines = [
-        "🌍 *MARKET CONTEXT*",
+        "🌍 <b>MARKET CONTEXT</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        "_Read this before anything else — market direction affects ALL stocks_",
+        "<i>Read this before anything else — market direction affects ALL stocks</i>",
         "",
     ]
 
     # SPY / QQQ
     if benchmarks:
-        lines.append("📊 *Overall Market:*")
+        lines.append("📊 <b>Overall Market:</b>")
         for ticker, d in benchmarks.items():
             emoji    = "📈" if d["chg"] >= 0 else "📉"
             trend_5d = f"  |  5-day: {d['trend_5d']:+.1f}%"
-            label    = "S&P 500 (whole market)" if ticker == "SPY" else "Nasdaq 100 (tech-heavy)"
-            lines.append(f"  {emoji} *{ticker}* ${d['price']} ({d['chg']:+.2f}%){trend_5d}")
-            lines.append(f"     _{label}_")
+            label    = "S&amp;P 500 (whole market)" if ticker == "SPY" else "Nasdaq 100 (tech-heavy)"
+            lines.append(f"  {emoji} <b>{ticker}</b> ${d['price']} ({d['chg']:+.2f}%){trend_5d}")
+            lines.append(f"     <i>{label}</i>")
 
         # Market mood based on SPY
         spy = benchmarks.get("SPY", {})
         qqq = benchmarks.get("QQQ", {})
         if spy and qqq:
             if spy["chg"] < -1.5:
-                lines.append("\n  🚨 *Risk-off day* — market down sharply. Most stocks will follow. Be cautious.")
+                lines.append("\n<blockquote>🚨 <b>Risk-off day</b> — market down sharply. Most stocks will follow. Be cautious.</blockquote>")
             elif spy["chg"] < -0.5:
-                lines.append("\n  ⚠️ *Weak market* — headwinds today. Only highest-conviction setups.")
+                lines.append("\n<blockquote>⚠️ <b>Weak market</b> — headwinds today. Only highest-conviction setups.</blockquote>")
             elif spy["chg"] > 1.5:
-                lines.append("\n  🚀 *Strong market* — rising tide. Momentum stocks may run further.")
+                lines.append("\n<blockquote>🚀 <b>Strong market</b> — rising tide. Momentum stocks may run further.</blockquote>")
             elif spy["chg"] > 0.5:
-                lines.append("\n  🟢 *Positive market* — favorable conditions for long positions.")
+                lines.append("\n<blockquote>🟢 <b>Positive market</b> — favorable conditions for long positions.</blockquote>")
             else:
-                lines.append("\n  🟡 *Flat market* — stock-specific news will drive individual moves.")
+                lines.append("\n<blockquote>🟡 <b>Flat market</b> — stock-specific news will drive individual moves.</blockquote>")
 
     # Fear & Greed
     if fear_greed.get("available"):
         fg = fear_greed
         lines += [
             "",
-            f"😱 *Fear & Greed Index:* {fg['score']}/100 — {fg['emoji']} {fg['rating']}",
-            f"   _{fg['advice']}_",
-            "   _0=Extreme Fear, 100=Extreme Greed_",
+            f"😱 <b>Fear &amp; Greed Index:</b> {fg['score']}/100 — {fg['emoji']} {html.escape(fg['rating'])}",
+            f"<blockquote>{html.escape(fg['advice'])}\n<i>0=Extreme Fear · 100=Extreme Greed</i></blockquote>",
         ]
 
     # Sector ETF comparison
     if sector_etfs:
-        lines += ["", "🏭 *Sector ETFs Today:*",
-                  "_If your stock lags its ETF, it's underperforming the sector_", ""]
+        lines += ["", "🏭 <b>Sector ETFs Today:</b>",
+                  "<i>If your stock lags its ETF, it's underperforming the sector</i>", ""]
         for sector, d in sector_etfs.items():
             emoji = "📈" if d["chg"] >= 0 else "📉"
-            lines.append(f"  {emoji} *{d['etf']}* ({sector}) {d['chg']:+.2f}%")
+            lines.append(f"  {emoji} <b>{d['etf']}</b> ({sector}) {d['chg']:+.2f}%")
 
     lines.append("")
     return "\n".join(lines)
