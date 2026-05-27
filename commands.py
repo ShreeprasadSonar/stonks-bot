@@ -76,69 +76,207 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
 
-# ── /market  (replaces /trending + /sector + /buzz)
+# ── /market  — full market intelligence dashboard
 async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Top movers overview + sector buttons + Reddit hot tickers."""
-    # If a sector name is passed (/market AI), show that sector
+    """Full market dashboard: movers + sectors + social + trends + narratives."""
+    from fetcher import get_top_movers
+    from technical import get_technical_signals
+    from reddit import get_dynamic_tickers, get_trending_tickers
+
+    # ── Sector deep-dive if arg given: /market AI
     if context.args:
         sector_name = " ".join(context.args).title()
+        # Special keyword: /market themes
+        if context.args[0].lower() == "themes":
+            await update.message.reply_text("📡 Scanning market narratives…")
+            try:
+                from themes import score_themes, format_themes_report
+                results = score_themes(use_trends=False)
+                await update.message.reply_text(format_themes_report(results), parse_mode=ParseMode.HTML)
+            except Exception as e:
+                await update.message.reply_text(f"❌ Themes scan failed: {e}")
+            return
+
         matched = next(
-            (k for k in SECTORS if k.lower() in sector_name.lower() or sector_name.lower() in k.lower()),
-            None,
+            (k for k in SECTORS if k.lower() in sector_name.lower() or sector_name.lower() in k.lower()), None
         )
         if matched:
-            await update.message.reply_text(f"Fetching <b>{_e(matched)}</b> sector…", parse_mode=ParseMode.HTML)
-            movers = get_top_movers(SECTORS[matched])
-            lines  = [f"<b>{_e(matched)} Sector</b>", "─────────────────────", ""]
-            for m in movers:
-                arrow    = "▲" if m["change_pct"] >= 0 else "▼"
-                vol_flag = "  ⚡" if m["volume_ratio"] > 2 else ""
-                lines.append(f"<b>{m['ticker']}</b>  ${m['price']}  {arrow} {m['change_pct']:+.2f}%{vol_flag}")
-            lines.append("\n/analyze &lt;TICKER&gt; for a full report")
-            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+            await _send_sector_detail(update, matched)
             return
         await update.message.reply_text(
-            f"Unknown sector. Available: {', '.join(SECTORS.keys())}",
+            f"Unknown sector. Available: {', '.join(SECTORS.keys())} · themes",
             parse_mode=ParseMode.HTML,
         )
         return
 
-    # No args — show top movers + sector buttons
-    await update.message.reply_text("Scanning market…")
+    # ── Full dashboard (no args) ──────────────────────────────────────────
+    await update.message.reply_text(
+        "📊 Building market dashboard…\n<i>~4 sections, takes ~20 seconds</i>",
+        parse_mode=ParseMode.HTML,
+    )
 
+    # ── MSG 1: Top Movers ─────────────────────────────────────────────────
     try:
-        from reddit import get_dynamic_tickers
         all_tickers = get_dynamic_tickers()
     except Exception:
         all_tickers = [t for tickers in SECTORS.values() for t in tickers]
-    movers = get_top_movers(all_tickers)[:8]
 
-    lines = ["<b>Top Movers</b>", "─────────────────────", ""]
-    for i, m in enumerate(movers, 1):
-        arrow    = "▲" if m["change_pct"] >= 0 else "▼"
+    movers = get_top_movers(all_tickers)
+    gainers = sorted(movers, key=lambda x: x["change_pct"], reverse=True)[:5]
+    losers  = sorted(movers, key=lambda x: x["change_pct"])[:3]
+
+    m1 = ["<b>📈 TOP MOVERS TODAY</b>", "─────────────────────", ""]
+    m1.append("<b>Gainers</b>")
+    for m in gainers:
         vol_flag = "  ⚡" if m["volume_ratio"] > 2.5 else ""
-        lines.append(f"{i}.  <b>{m['ticker']}</b>  ${m['price']}  {arrow} {m['change_pct']:+.2f}%{vol_flag}")
+        tech     = get_technical_signals(m["history"])
+        rsi_str  = f"  RSI {tech['rsi']}" if tech.get("rsi") else ""
+        m1.append(f"  ▲ <b>{m['ticker']}</b>  ${m['price']}  <b>+{m['change_pct']:.2f}%</b>{vol_flag}{rsi_str}")
 
-    # Reddit hot tickers block
+    m1 += ["", "<b>Laggards</b>"]
+    for m in losers:
+        if m["change_pct"] < 0:
+            m1.append(f"  ▼ <b>{m['ticker']}</b>  ${m['price']}  <b>{m['change_pct']:.2f}%</b>")
+
+    # Volume spikes
+    vol_spikes = [m for m in movers if m["volume_ratio"] > 3][:3]
+    if vol_spikes:
+        m1 += ["", "<b>⚡ Unusual Volume</b>  <i>(3x+ normal — someone is moving)</i>"]
+        for m in vol_spikes:
+            m1.append(f"  <b>{m['ticker']}</b>  {m['volume_ratio']:.1f}x normal volume")
+
+    await update.message.reply_text("\n".join(m1), parse_mode=ParseMode.HTML)
+
+    # ── MSG 2: Sector Snapshot ────────────────────────────────────────────
+    m2 = ["<b>📊 SECTOR SNAPSHOT</b>", "─────────────────────", ""]
+    for sector, tickers in SECTORS.items():
+        sector_data = [m for m in movers if m["ticker"] in tickers]
+        if not sector_data:
+            continue
+        avg_chg = sum(m["change_pct"] for m in sector_data) / len(sector_data)
+        trend   = "▲" if avg_chg >= 0 else "▼"
+        best    = max(sector_data, key=lambda x: x["change_pct"])
+        worst   = min(sector_data, key=lambda x: x["change_pct"])
+        bar     = "🟩" * max(0, min(5, int((avg_chg + 3) / 1.2))) + "⬜" * max(0, 5 - max(0, min(5, int((avg_chg + 3) / 1.2))))
+        m2.append(
+            f"<b>{sector}</b>  {bar}  {trend} {avg_chg:+.1f}%\n"
+            f"  Best: <b>{best['ticker']}</b> {best['change_pct']:+.1f}%  ·  "
+            f"Worst: <b>{worst['ticker']}</b> {worst['change_pct']:+.1f}%"
+        )
+
+    # Inline buttons to drill into each sector
+    sector_rows = [[InlineKeyboardButton(s, callback_data=f"market:{s}") for s in list(SECTORS.keys())[i:i+2]]
+                   for i in range(0, len(SECTORS), 2)]
+    await update.message.reply_text(
+        "\n".join(m2),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(sector_rows),
+    )
+
+    # ── MSG 3: Social Sentiment ───────────────────────────────────────────
+    m3 = ["<b>💬 SOCIAL SENTIMENT</b>", "─────────────────────", ""]
+
+    # Yahoo Finance trending
     try:
-        hot = get_reddit_hot_tickers(limit=6)
-        if hot:
-            lines += ["", "<b>Reddit Buzz</b>  <i>most-mentioned right now</i>"]
-            for h in hot[:5]:
-                lines.append(f"  <b>{_e(h['ticker'])}</b>  {h['mentions']} mentions")
+        trending = get_trending_tickers(15)
+        if trending:
+            m3.append("<b>🔥 Yahoo Finance Trending</b>  <i>(most-searched right now)</i>")
+            ranked = "  ".join(f"<b>{_e(t)}</b>" for t in trending[:10])
+            m3 += [f"  {ranked}", ""]
     except Exception:
         pass
 
-    lines.append("\n/analyze &lt;TICKER&gt;  ·  /market &lt;SECTOR&gt; for sector view")
+    # Reddit hot tickers
+    try:
+        hot = get_reddit_hot_tickers(limit=8)
+        if hot:
+            m3.append("<b>Reddit Buzz</b>  <i>r/wallstreetbets · r/stocks</i>")
+            for h in hot[:6]:
+                bar = "█" * min(10, h["mentions"] // 2) if h["mentions"] > 1 else "░"
+                m3.append(f"  <b>{_e(h['ticker'])}</b>  {bar}  {h['mentions']} mentions")
+            m3.append("")
+    except Exception:
+        pass
 
-    # Sector quick-pick buttons + themes button
-    sector_rows = [[InlineKeyboardButton(s, callback_data=f"market:{s}") for s in list(SECTORS.keys())[i:i+2]]
-                   for i in range(0, len(SECTORS), 2)]
-    themes_row  = [InlineKeyboardButton("📡 Narrative Tracker", callback_data="market:themes")]
+    # News sentiment for top 3 movers
+    try:
+        from sentiment import score_news
+        from news import get_news
+        m3.append("<b>News Mood — Top Movers</b>")
+        for m in gainers[:3]:
+            articles = get_news(m["ticker"], limit=5)
+            sent     = score_news(articles)
+            m3.append(f"  <b>{m['ticker']}</b>  {sent['label']}")
+    except Exception:
+        pass
+
+    await update.message.reply_text("\n".join(m3), parse_mode=ParseMode.HTML)
+
+    # ── MSG 4: Narrative Tracker ──────────────────────────────────────────
+    try:
+        from themes import score_themes
+        theme_results = score_themes(use_trends=False)
+        hot_themes    = [t for t in theme_results if t["score"] >= 10][:5]
+
+        m4 = ["<b>📡 NARRATIVE TRACKER</b>", "<i>What smart money is focused on</i>", "─────────────────────", ""]
+        for th in hot_themes:
+            tickers_str = "  ".join(f"<b>{_e(tk)}</b>" for tk in th["tickers"][:5])
+            m4.append(f"{th['momentum']}  <b>{_e(th['name'])}</b>")
+            m4.append(f"  {tickers_str}")
+            if th["top_headlines"]:
+                m4.append(f"  <i>📰 {_e(th['top_headlines'][0][:90])}</i>")
+            m4.append("")
+
+        themes_btn = [[InlineKeyboardButton("📡 Full Narrative Report", callback_data="market:themes")]]
+        await update.message.reply_text(
+            "\n".join(m4),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(themes_btn),
+        )
+    except Exception as e:
+        await update.message.reply_text(f"<i>Narrative tracker unavailable: {e}</i>", parse_mode=ParseMode.HTML)
+
+
+async def _send_sector_detail(update, sector_name: str):
+    """Send a detailed breakdown of a single sector."""
+    from technical import get_technical_signals
+    from sentiment import score_news
+    from news import get_news
+
+    await update.message.reply_text(f"Fetching <b>{_e(sector_name)}</b> sector detail…", parse_mode=ParseMode.HTML)
+    movers = get_top_movers(SECTORS[sector_name])
+
+    lines = [f"<b>{_e(sector_name)} Sector — Full View</b>", "─────────────────────", ""]
+    for m in sorted(movers, key=lambda x: x["change_pct"], reverse=True):
+        arrow    = "▲" if m["change_pct"] >= 0 else "▼"
+        vol_flag = "  ⚡" if m["volume_ratio"] > 2 else ""
+        tech     = get_technical_signals(m["history"])
+        rsi_str  = f"  RSI {tech['rsi']}" if tech.get("rsi") else ""
+
+        # Quick news sentiment
+        try:
+            articles = get_news(m["ticker"], limit=3)
+            sent     = score_news(articles)
+            mood     = sent["label"]
+        except Exception:
+            mood = ""
+
+        mood_str = f"  {mood}" if mood else ""
+        lines.append(
+            f"<b>{m['ticker']}</b>  ${m['price']}  {arrow} {m['change_pct']:+.2f}%"
+            f"{vol_flag}{rsi_str}{mood_str}"
+        )
+        if tech.get("signals"):
+            for sig in tech["signals"][:1]:
+                lines.append(f"  <i>⚡ {_e(sig)}</i>")
+
+    lines += ["", "/analyze &lt;TICKER&gt; for a deep-dive"]
+    ticker_btns = [[InlineKeyboardButton(m["ticker"], callback_data=f"analyze:{m['ticker']}") for m in movers[i:i+4]]
+                   for i in range(0, len(movers), 4)]
     await update.message.reply_text(
         "\n".join(lines),
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(sector_rows + [themes_row]),
+        reply_markup=InlineKeyboardMarkup(ticker_btns),
     )
 
 
@@ -348,7 +486,7 @@ async def cmd_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     elif cmd == "market":
         if value == "themes":
-            await send("📡 Scanning market narratives… (~15s)")
+            await send("📡 Scanning market narratives…")
             try:
                 from themes import score_themes, format_themes_report
                 results = score_themes(use_trends=False)
@@ -359,13 +497,30 @@ async def cmd_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         sector_name = value.title()
         matched = next((k for k in SECTORS if k.lower() in sector_name.lower()), None)
         if matched:
+            from technical import get_technical_signals
+            from sentiment import score_news
+            from news import get_news
             movers = get_top_movers(SECTORS[matched])
             lines  = [f"<b>{_e(matched)} Sector</b>", "─────────────────────", ""]
-            for m in movers:
-                arrow = "▲" if m["change_pct"] >= 0 else "▼"
-                lines.append(f"<b>{m['ticker']}</b>  ${m['price']}  {arrow} {m['change_pct']:+.2f}%")
-            lines.append("\n/analyze &lt;TICKER&gt; for a full report")
-            await send("\n".join(lines))
+            for m in sorted(movers, key=lambda x: x["change_pct"], reverse=True):
+                arrow    = "▲" if m["change_pct"] >= 0 else "▼"
+                vol_flag = "  ⚡" if m["volume_ratio"] > 2 else ""
+                tech     = get_technical_signals(m["history"])
+                rsi_str  = f"  RSI {tech['rsi']}" if tech.get("rsi") else ""
+                try:
+                    sent = score_news(get_news(m["ticker"], limit=3))
+                    mood = f"  {sent['label']}"
+                except Exception:
+                    mood = ""
+                lines.append(f"<b>{m['ticker']}</b>  ${m['price']}  {arrow} {m['change_pct']:+.2f}%{vol_flag}{rsi_str}{mood}")
+            lines.append("\nTap a ticker for full analysis:")
+            ticker_btns = [[InlineKeyboardButton(m["ticker"], callback_data=f"analyze:{m['ticker']}") for m in movers[i:i+4]]
+                           for i in range(0, len(movers), 4)]
+            await context.bot.send_message(
+                chat_id=chat_id, text="\n".join(lines),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(ticker_btns),
+            )
 
     elif cmd == "social":
         ticker = value.upper()
