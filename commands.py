@@ -49,7 +49,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
- 
+
 # ── /analyze
 async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -106,8 +106,12 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # No args — show top movers + sector buttons
     await update.message.reply_text("Scanning market…")
 
-    all_tickers = [t for tickers in SECTORS.values() for t in tickers]
-    movers      = get_top_movers(all_tickers)[:8]
+    try:
+        from reddit import get_dynamic_tickers
+        all_tickers = get_dynamic_tickers()
+    except Exception:
+        all_tickers = [t for tickers in SECTORS.values() for t in tickers]
+    movers = get_top_movers(all_tickers)[:8]
 
     lines = ["<b>Top Movers</b>", "─────────────────────", ""]
     for i, m in enumerate(movers, 1):
@@ -127,13 +131,14 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines.append("\n/analyze &lt;TICKER&gt;  ·  /market &lt;SECTOR&gt; for sector view")
 
-    # Sector quick-pick buttons
+    # Sector quick-pick buttons + themes button
     sector_rows = [[InlineKeyboardButton(s, callback_data=f"market:{s}") for s in list(SECTORS.keys())[i:i+2]]
                    for i in range(0, len(SECTORS), 2)]
+    themes_row  = [InlineKeyboardButton("📡 Narrative Tracker", callback_data="market:themes")]
     await update.message.reply_text(
         "\n".join(lines),
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(sector_rows),
+        reply_markup=InlineKeyboardMarkup(sector_rows + [themes_row]),
     )
 
 
@@ -342,6 +347,15 @@ async def cmd_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await send(f"❌ {e}")
 
     elif cmd == "market":
+        if value == "themes":
+            await send("📡 Scanning market narratives… (~15s)")
+            try:
+                from themes import score_themes, format_themes_report
+                results = score_themes(use_trends=False)
+                await send(format_themes_report(results))
+            except Exception as e:
+                await send(f"❌ Themes scan failed: {e}")
+            return
         sector_name = value.title()
         matched = next((k for k in SECTORS if k.lower() in sector_name.lower()), None)
         if matched:
