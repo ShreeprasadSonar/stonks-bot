@@ -1,239 +1,627 @@
-"""Telegram bot command handlers."""
-from telegram import Update
-from telegram.ext import ContextTypes
-from telegram.constants import ParseMode
+"""Format analysis results into clean, professional Telegram messages (HTML mode)."""
+import html as _html
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from fetcher import format_market_cap
 
-from fetcher    import get_stock_info, get_top_movers
-from news       import get_news, check_political_mentions
-from technical  import get_technical_signals
-from fundamental import score_fundamentals
-from sentiment  import score_news
-from formatter  import format_analyze_report, EXPLAIN_DICT
-from reddit     import get_reddit_sentiment, format_reddit_report
-from config     import SECTORS
-import watchlist as wl_db
+CT  = ZoneInfo("America/Chicago")
+DIV = "─────────────────────"
 
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "👋 *Welcome to StockBot!*\n\n"
-        "I'm your personal stock analyst — I give you plain-English signals so you can make better investment decisions.\n\n"
-        "📌 *Commands:*\n"
-        "  /analyze NVDA — Full analyst report\n"
-        "  /sector AI — Top movers in a sector\n"
-        "  /trending — Today's top momentum stocks\n"
-        "  /political NVDA — Political & news signals\n"
-        "  /watchlist — Your saved stocks\n"
-        "  /explain rsi — Learn what RSI means\n"
-        "  /help — Show all commands\n\n"
-        "💡 _Start with_ /analyze NVDA _to see a full report._"
+def ct_now_str() -> str:
+    return datetime.now(CT).strftime("%a %b %d · %I:%M %p CT")
+
+
+def _e(text) -> str:
+    return _html.escape(str(text))
+
+
+def score_label(score: int) -> str:
+    if score >= 70: return "🟢 Strong Signal"
+    if score >= 50: return "🟡 Watch Closely"
+    if score >= 30: return "🟠 Mixed — Hold Off"
+    return "🔴 Avoid"
+
+
+def score_summary(score: int, ticker: str, tech: dict, fund: dict, sentiment: dict) -> str:
+    reasons = []
+    if tech["score"] >= 60:
+        reasons.append("charts are bullish")
+    elif tech["score"] <= 35:
+        reasons.append("charts look weak")
+    if fund["score"] >= 60:
+        reasons.append("financials are strong")
+    elif fund["score"] <= 35:
+        reasons.append("earnings/growth look soft")
+    sent_score = max(0, min(100, (sentiment["score"] + 1) * 50))
+    if sent_score >= 60:
+        reasons.append("news is positive")
+    elif sent_score <= 35:
+        reasons.append("news is mostly negative")
+    if not reasons:
+        return f"Signals are mixed for {ticker} — no clear edge right now."
+    return f"{ticker} scores {score}/100 — {', '.join(reasons)}."
+
+
+def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, reddit: dict = None) -> str:
+    ticker    = _e(stock["ticker"])
+    name      = _e(stock["name"])
+    price     = stock["price"]
+    chg       = stock["change_pct"]
+    chg_emoji = "▲" if chg >= 0 else "▼"
+    chg_color = "+" if chg >= 0 else ""
+
+    composite = int(
+        tech["score"]  * 0.30 +
+        fund["score"]  * 0.25 +
+        max(0, min(100, (sentiment["score"] + 1) * 50)) * 0.20 +
+        50             * 0.25
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+    # 52W range bar
+    try:
+        w52_hi = float(tech["week52_high"])
+        w52_lo = float(tech["week52_low"])
+        pct_of_range = ((price - w52_lo) / (w52_hi - w52_lo) * 100) if w52_hi != w52_lo else 50
+        blocks    = int(pct_of_range / 10)
+        range_bar = "▓" * blocks + "░" * (10 - blocks)
+    except Exception:
+        range_bar    = ""
+        pct_of_range = 0
+
+    # Earnings alert
+    earnings_line = ""
+    try:
+        ed = stock.get("earnings_date")
+        if ed:
+            from datetime import datetime as _dt, timezone
+            if hasattr(ed, "to_pydatetime"):
+                ed = ed.to_pydatetime()
+            now      = _dt.now(timezone.utc)
+            ed_aware = ed.replace(tzinfo=timezone.utc) if ed.tzinfo is None else ed
+            days     = (ed_aware - now).days
+            if days <= 0:
+                earnings_line = "⚡ <b>Earnings just passed</b> — watch for post-earnings move"
+            elif days <= 7:
+                earnings_line = f"🚨 <b>Earnings in {days}d</b> — price can swing ±20%+"
+            elif days <= 14:
+                earnings_line = f"📅 <b>Earnings in {days}d</b> — stocks often run up beforehand"
+    except Exception:
+        pass
+
+    # ── Header
+    lines = [
+        f"<b>{name}</b>  <code>{ticker}</code>",
+        f"<i>{ct_now_str()}</i>",
+        DIV,
+        f"<b>${price}</b>  {chg_emoji} <b>{chg_color}{chg:.2f}%</b>",
+        f"{format_market_cap(stock['market_cap'])} cap  ·  {_e(stock['sector'])}",
+    ]
+
+    if earnings_line:
+        lines += ["", earnings_line]
+
+    # Risk row
+    risk_parts = []
+    if stock.get("beta") is not None:
+        b      = stock["beta"]
+        blabel = "high vol" if b > 1.5 else ("low vol" if b < 0.8 else "normal vol")
+        risk_parts.append(f"β {b} ({blabel})")
+    if stock.get("short_interest") is not None:
+        si = stock["short_interest"]
+        si_label = "🔴 squeeze risk" if si > 20 else ("⚠️ elevated" if si > 10 else "normal")
+        risk_parts.append(f"Short {si}% ({si_label})")
+    if risk_parts:
+        lines.append(f"<i>{_e('  ·  '.join(risk_parts))}</i>")
+
+    # ── 52W Range
+    lines += [
+        "",
+        DIV,
+        f"<b>52-Week Range</b>",
+        f"  <code>${tech['week52_low']}</code>  {range_bar}  <code>${tech['week52_high']}</code>",
+        f"  <i>{pct_of_range:.0f}% of yearly range · {_e(tech['high_label'])}</i>",
+    ]
+
+    # Support / Resistance / ATR
+    if tech.get("support") and tech.get("resistance"):
+        lines += [
+            "",
+            f"<b>Key Levels</b>",
+            f"  🟢 Support    <b>${tech['support']}</b>  <i>({tech['pct_to_support']:+.1f}%)</i>",
+            f"  🔴 Resistance <b>${tech['resistance']}</b>  <i>({tech['pct_to_resist']:+.1f}%)</i>",
+        ]
+        if tech.get("atr"):
+            sl = round(price - tech["atr"] * 1.5, 2)
+            lines.append(f"  📐 ATR ±${tech['atr']}  ·  stop-loss ~<b>${sl}</b>")
+
+    # ── Technicals
+    lines += [
+        "",
+        DIV,
+        "<b>TECHNICALS</b>",
+        "",
+        f"  RSI    <b>{tech['rsi']}</b>  ·  {_e(tech['rsi_label'])}",
+        f"  MACD   {_e(tech['macd_label'])}",
+        f"  Trend  {_e(tech['ma_label'] or 'Insufficient data')}",
+    ]
+
+    bb = tech.get("bollinger", {})
+    if bb.get("signal"):
+        pct_b_str = f"  <i>({bb['pct_b']}% of band)</i>" if bb.get("pct_b") is not None else ""
+        lines.append(f"  BB     {_e(bb['signal'])}{pct_b_str}")
+
+    if tech.get("signals"):
+        lines += ["", "<b>Active Alerts</b>"]
+        for s in tech["signals"]:
+            lines.append(f"  {_e(s)}")
+
+    if tech.get("confidence"):
+        lines.append(f"  <i>Confidence: {_e(tech['confidence'])}</i>")
+
+    # ── Company Health
+    lines += ["", DIV, "<b>COMPANY HEALTH</b>", ""]
+    if fund["notes"]:
+        for note in fund["notes"]:
+            lines.append(f"  {_e(note)}")
+    else:
+        lines.append("  Data unavailable — try again shortly")
+
+    # ── News
+    lines += [
+        "",
+        DIV,
+        f"<b>NEWS</b>  ·  {_e(sentiment['label'])}",
+        "",
+    ]
+    top_news = sentiment.get("scored", [])[:4]
+    if top_news:
+        for n in top_news:
+            title  = _e(n["title"][:85])
+            url    = n.get("link", "")
+            source = _e(n.get("source", ""))
+            label  = _e(n.get("label", ""))
+            src_str = f"  <i>{source}</i>" if source else ""
+            if url:
+                lines.append(f'  • <a href="{url}">{title}</a>{src_str}')
+            else:
+                lines.append(f"  • {title}{src_str}")
+            lines.append(f"    {label}")
+    else:
+        lines.append("  No news found today")
+
+    # ── Social Interest
+    if reddit and reddit.get("available"):
+        lines += ["", DIV, "<b>SOCIAL INTEREST</b>", ""]
+        if reddit.get("is_trending"):
+            rank = reddit.get("trend_rank")
+            rank_str = f"  ·  #{rank} on Yahoo Finance" if rank else ""
+            lines += [
+                f"  {_e(reddit['hype_label'])}{rank_str}",
+                f"  {_e(reddit['sentiment'])}",
+                f'  <a href="https://finance.yahoo.com/quote/{ticker}">Yahoo Finance →</a>',
+            ]
+        else:
+            lines += [
+                f"  🔇 Not in today's trending list",
+                f'  <a href="https://finance.yahoo.com/quote/{ticker}">Yahoo Finance →</a>',
+            ]
+
+    # ── Score
+    score_bar = "█" * (composite // 10) + "░" * (10 - composite // 10)
+    lines += [
+        "",
+        DIV,
+        f"<b>SCORE  {composite}/100</b>",
+        f"  <code>{score_bar}</code>  {score_label(composite)}",
+        f"  <i>{_e(score_summary(composite, stock['ticker'], tech, fund, sentiment))}</i>",
+        DIV,
+        f"<i>/analyze /trending /sector /explain</i>",
+    ]
+
+    return "\n".join(lines)
 
 
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "📖 *StockBot Commands*\n\n"
-        "/analyze <TICKER>   — Full report: price, technicals, fundamentals, sentiment, Reddit buzz\n"
-        "/sector <NAME>      — Top movers in AI / Semiconductors / Cloud / Software\n"
-        "/trending           — Top 5 stocks by momentum today\n"
-        "/political <TICKER> — Congressional trades & political news\n"
-        "/reddit <TICKER>    — Yahoo trending & social interest for a stock\n"
-        "/watchlist          — View your watchlist\n"
-        "/watch <TICKER>     — Add to watchlist\n"
-        "/unwatch <TICKER>   — Remove from watchlist\n"
-        "/explain <TERM>     — Plain-English explanation (rsi, macd, pe, 52w, golden, volume, sentiment, reddit)\n"
+EXPLAIN_DICT = {
+    "rsi": (
+        "<b>RSI — Relative Strength Index</b>\n\n"
+        "Tells you if a stock is being bought or sold too aggressively.\n\n"
+        "• <b>&lt; 30</b> 🟢 Oversold — heavy selling. Possible bounce zone.\n"
+        "• <b>&gt; 70</b> 🔴 Overbought — heavy buying. Pullback may follow.\n"
+        "• <b>30–70</b> 🟡 Normal — no extreme signal.\n\n"
+        "<b>Example:</b> NVDA RSI hit 28 in Jan 2024 → rallied 40% over the next 3 months."
+    ),
+    "macd": (
+        "<b>MACD — Momentum Indicator</b>\n\n"
+        "Shows whether a stock's price momentum is accelerating or fading.\n\n"
+        "• <b>Bullish crossover</b> 🟢 Momentum turning positive.\n"
+        "• <b>Bearish crossover</b> 🔴 Momentum slowing — trend may reverse.\n\n"
+        "<b>Tip:</b> MACD crossovers are stronger when RSI confirms the same direction."
+    ),
+    "pe": (
+        "<b>P/E Ratio — Price-to-Earnings</b>\n\n"
+        "How many years of profit you're paying for today.\n\n"
+        "• <b>P/E 10</b> — $10 per $1 annual profit. Cheap.\n"
+        "• <b>P/E 20</b> — Fair value for stable companies.\n"
+        "• <b>P/E 50+</b> — Expensive. Market expects explosive growth.\n\n"
+        "<b>Note:</b> AI/tech stocks often carry P/E 40–100 due to growth expectations."
+    ),
+    "52w": (
+        "<b>52-Week High &amp; Low</b>\n\n"
+        "The highest and lowest prices over the past 12 months.\n\n"
+        "• Near <b>52W High</b> 🚀 Strong momentum — stock at peak strength.\n"
+        "• Near <b>52W Low</b> ⚠️ At weakest point — bargain or still falling?\n\n"
+        "<b>Tip:</b> A breakout above the 52W high on high volume = one of the strongest buy signals."
+    ),
+    "golden": (
+        "<b>Golden Cross &amp; Death Cross</b>\n\n"
+        "Compares the 50-day and 200-day moving averages.\n\n"
+        "• <b>Golden Cross</b> 🌙 50-day crosses above 200-day → bullish long-term.\n"
+        "• <b>Death Cross</b> ☠️ 50-day crosses below 200-day → downtrend warning.\n\n"
+        "<b>History:</b> The S&P 500 golden cross in late 2023 preceded a 25% rally."
+    ),
+    "volume": (
+        "<b>Volume Spike</b>\n\n"
+        "Way more shares traded than normal — institutional money is moving.\n\n"
+        "• <b>2x+ on UP day</b> 🟢 Strong conviction buying.\n"
+        "• <b>2x+ on DOWN day</b> 🔴 Heavy selling — possible panic.\n\n"
+        "<b>Rule:</b> Never trust a price move that isn't backed by volume."
+    ),
+    "sentiment": (
+        "<b>News Sentiment</b>\n\n"
+        "The bot reads today's headlines and scores the overall mood.\n\n"
+        "• <b>Bullish</b> 🟢 Headlines are mostly positive.\n"
+        "• <b>Bearish</b> 🔴 More negative news than positive.\n"
+        "• <b>Neutral</b> 🟡 Mixed or no significant news.\n\n"
+        "<b>Tip:</b> Sentiment changes fast. Recheck after earnings or major announcements."
+    ),
+    "score": (
+        "<b>Investment Score (0–100)</b>\n\n"
+        "Four signals combined into one number:\n\n"
+        "  30% Technical  (RSI, MACD, moving averages)\n"
+        "  25% Fundamental  (P/E, revenue, EPS)\n"
+        "  20% Sentiment  (news headline mood)\n"
+        "  25% Momentum  (price trend, volume)\n\n"
+        "🟢 <b>70–100</b>  Strong signal\n"
+        "🟡 <b>50–70</b>   Worth watching\n"
+        "🟠 <b>30–50</b>   Mixed — hold off\n"
+        "🔴 <b>0–30</b>    Avoid for now"
+    ),
+    "bb": (
+        "<b>Bollinger Bands</b>\n\n"
+        "A price channel showing normal vs extreme moves.\n\n"
+        "• <b>At lower band</b> 🟢 Price unusually low — possible bounce.\n"
+        "• <b>At upper band</b> 🔴 Price unusually high — possible pullback.\n"
+        "• <b>Mid-band</b> Normal territory.\n\n"
+        "<b>Power combo:</b> RSI &lt; 35 <i>and</i> price at lower band = high-confidence oversold signal."
+    ),
+    "reddit": (
+        "<b>Social Interest — Yahoo Finance Trending</b>\n\n"
+        "Is this stock in the most-searched tickers on Yahoo Finance right now?\n\n"
+        "• <b>#1–3</b> 🚀 Extremely high retail attention\n"
+        "• <b>#4–10</b> 🔥 High interest — people are researching it\n"
+        "• <b>Not trending</b> 🔇 Below the radar today\n\n"
+        "<b>Why it matters:</b> A spike in trending rank often precedes a price move — especially when combined with bullish news."
+    ),
+}
+
+
+
+def score_label(score: int) -> str:
+    if score >= 70: return "🟢 Strong Buy Signal"
+    if score >= 50: return "🟡 Watch — Worth Monitoring"
+    if score >= 30: return "🟠 Hold — Mixed Signals"
+    return "🔴 Avoid — Bearish Signs"
+
+
+def score_summary(score: int, ticker: str, tech: dict, fund: dict, sentiment: dict) -> str:
+    """One-sentence plain-English explanation of the score."""
+    reasons = []
+    if tech["score"] >= 60:
+        reasons.append("technical charts are looking bullish")
+    elif tech["score"] <= 35:
+        reasons.append("technical charts look weak")
+    if fund["score"] >= 60:
+        reasons.append("the company's financials are strong")
+    elif fund["score"] <= 35:
+        reasons.append("earnings/growth look concerning")
+    sent_score = max(0, min(100, (sentiment["score"] + 1) * 50))
+    if sent_score >= 60:
+        reasons.append("recent news is mostly positive")
+    elif sent_score <= 35:
+        reasons.append("news headlines are mostly negative")
+    if not reasons:
+        return f"Signals are mixed for {ticker} — monitor closely before acting."
+    return f"{ticker} scores {score}/100 because {', and '.join(reasons)}."
+
+
+def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, reddit: dict = None) -> str:
+    """
+    Returns an HTML-formatted report for Telegram (use ParseMode.HTML).
+    News headlines are embedded hyperlinks — tap to read the full article.
+    """
+    ticker    = _e(stock["ticker"])
+    name      = _e(stock["name"])
+    price     = stock["price"]
+    chg       = stock["change_pct"]
+    chg_emoji = "📈" if chg >= 0 else "📉"
+    chg_color = "+" if chg >= 0 else ""
+
+    composite = int(
+        tech["score"]  * 0.30 +
+        fund["score"]  * 0.25 +
+        max(0, min(100, (sentiment["score"] + 1) * 50)) * 0.20 +
+        50             * 0.25
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-
-async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /analyze NVDA")
-        return
-
-    ticker = context.args[0].upper()
-    await update.message.reply_text(f"🔍 Analyzing {ticker}… please wait.")
-
+    # ── 52W range bar ─────────────────────────────────────────
     try:
-        stock = get_stock_info(ticker)
-        if "error" in stock:
-            await update.message.reply_text(f"❌ {stock['error']}")
-            return
+        w52_hi = float(tech["week52_high"])
+        w52_lo = float(tech["week52_low"])
+        pct_of_range = ((price - w52_lo) / (w52_hi - w52_lo) * 100) if w52_hi != w52_lo else 50
+        blocks   = int(pct_of_range / 10)
+        range_bar = "▓" * blocks + "░" * (10 - blocks)
+        range_desc = f"{range_bar}  <i>{pct_of_range:.0f}% of yearly range</i>"
+    except Exception:
+        range_desc = ""
 
-        tech      = get_technical_signals(stock["history"])
-        fund      = score_fundamentals(stock)
-        articles  = get_news(ticker, stock["name"])
-        sentiment = score_news(articles)
-        reddit    = get_reddit_sentiment(ticker)
-
-        report = format_analyze_report(stock, tech, fund, sentiment, reddit)
-        await update.message.reply_text(report, parse_mode=ParseMode.HTML)
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error analyzing {ticker}: {str(e)}")
-
-
-async def cmd_sector(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sector_name = " ".join(context.args).title() if context.args else ""
-
-    matched = None
-    for key in SECTORS:
-        if key.lower() in sector_name.lower() or sector_name.lower() in key.lower():
-            matched = key
-            break
-
-    if not matched:
-        sectors_list = ", ".join(SECTORS.keys())
-        await update.message.reply_text(f"Usage: /sector AI\nAvailable: {sectors_list}")
-        return
-
-    tickers = SECTORS[matched]
-    await update.message.reply_text(f"🔍 Fetching {matched} sector movers…")
-
-    movers = get_top_movers(tickers)
-    lines  = [f"📊 *{matched} Sector — Top Movers*\n"]
-    for m in movers:
-        emoji    = "📈" if m["change_pct"] >= 0 else "📉"
-        vol_flag = " ⚡ Vol spike!" if m["volume_ratio"] > 2 else ""
-        lines.append(f"{emoji} *{m['ticker']}* ${m['price']} ({m['change_pct']:+.2f}%){vol_flag}")
-    lines.append("\n💡 Use /analyze NVDA for a deep dive on any stock.")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-
-
-async def cmd_trending(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    all_tickers = [t for tickers in SECTORS.values() for t in tickers]
-    await update.message.reply_text("🔍 Finding today's top movers…")
-    movers = get_top_movers(all_tickers)[:5]
-    lines  = ["🔥 *Today's Top 5 Momentum Stocks*\n"]
-    for i, m in enumerate(movers, 1):
-        emoji = "📈" if m["change_pct"] >= 0 else "📉"
-        lines.append(f"{i}. {emoji} *{m['ticker']}* — ${m['price']} ({m['change_pct']:+.2f}%)")
-    lines.append("\n💡 Use /analyze <TICKER> for a full report.")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-
-
-async def cmd_political(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /political NVDA")
-        return
-
-    ticker = context.args[0].upper()
-    await update.message.reply_text(f"🏛️ Checking political signals for {ticker}…")
-
-    stock = get_stock_info(ticker)
-    hits  = check_political_mentions(ticker, stock.get("name", ticker))
-
-    if not hits:
-        await update.message.reply_text(f"No recent political news found for {ticker}.")
-        return
-
-    lines = [f"🏛️ *Political Signals for {ticker}*\n"]
-    for h in hits[:5]:
-        keywords = ", ".join(h["political_keywords"])
-        lines.append(f"• {h['title'][:90]}…\n  _Keywords: {keywords}_\n")
-    lines.append("💡 Congressional buy/sell alerts coming in Phase 4!")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-
-
-async def cmd_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        terms = ", ".join(EXPLAIN_DICT.keys())
-        await update.message.reply_text(f"Usage: /explain rsi\nAvailable terms: {terms}")
-        return
-    term = context.args[0].lower()
-    msg  = EXPLAIN_DICT.get(term)
-    if not msg:
-        terms = ", ".join(EXPLAIN_DICT.keys())
-        await update.message.reply_text(f"Unknown term. Try: {terms}")
-        return
-    await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
-
-
-# Persistent watchlist via SQLite (watchlist.py)
-
-async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not context.args:
-        await update.message.reply_text("Usage: /watch NVDA")
-        return
-    ticker = context.args[0].upper()
-    wl_db.add_ticker(uid, ticker)
-    await update.message.reply_text(f"✅ Added *{ticker}* to your watchlist.\nYour watchlist: " +
-                                    ", ".join(wl_db.get_watchlist(uid)),
-                                    parse_mode=ParseMode.MARKDOWN)
-
-async def cmd_unwatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not context.args:
-        await update.message.reply_text("Usage: /unwatch NVDA")
-        return
-    ticker = context.args[0].upper()
-    wl_db.remove_ticker(uid, ticker)
-    remaining = wl_db.get_watchlist(uid)
-    msg = f"✅ Removed *{ticker}* from your watchlist."
-    if remaining:
-        msg += f"\nRemaining: {', '.join(remaining)}"
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-
-async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    wl  = wl_db.get_watchlist(uid)
-    if not wl:
-        await update.message.reply_text("Your watchlist is empty.\nUse /watch NVDA to add stocks.")
-        return
-    lines = ["📋 *Your Watchlist:*\n"] + [f"• {t}" for t in wl]
-    lines.append("\n💡 Use /analyze NVDA for a full report on any stock.")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-
-
-async def cmd_reddit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /reddit NVDA")
-        return
-
-    ticker = context.args[0].upper()
-    await update.message.reply_text(f"📊 Checking Yahoo Finance trending & sentiment for {ticker}…")
-
-
+    # ── Earnings warning ──────────────────────────────────────
+    earnings_line = ""
     try:
-        data   = get_reddit_sentiment(ticker)
-        report = format_reddit_report(ticker, data)
-        report += (
-            f"\n\n💡 /analyze {ticker} — full technical + fundamental report\n"
-            f"<i>⚠️ High social hype ≠ good investment. Always check technicals.</i>"
-        )
-        await update.message.reply_text(report, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Yahoo trending fetch failed for {ticker}: {str(e)}")
+        ed = stock.get("earnings_date")
+        if ed:
+            from datetime import datetime as _dt, timezone
+            if hasattr(ed, "to_pydatetime"):
+                ed = ed.to_pydatetime()
+            now      = _dt.now(timezone.utc)
+            ed_aware = ed.replace(tzinfo=timezone.utc) if ed.tzinfo is None else ed
+            days     = (ed_aware - now).days
+            if days <= 0:
+                earnings_line = "⚠️ <b>Earnings just passed</b> — watch for post-earnings move"
+            elif days <= 7:
+                earnings_line = f"🚨 <b>Earnings in {days} days</b> — HIGH RISK. Price can swing ±20%+"
+            elif days <= 14:
+                earnings_line = f"⚠️ <b>Earnings in {days} days</b> — stocks often run up beforehand"
+            else:
+                earnings_line = f"📅 Next earnings: ~{days} days away"
+    except Exception:
+        pass
+
+    # ── Header ────────────────────────────────────────────────
+    lines = [
+        f"📊 <b>{name} ({ticker})</b>",
+        f"🕐 {ct_now_str()}",
+        DIV,
+        "",
+        f"💵 <b>${price}</b>  {chg_emoji} <b>{chg_color}{chg:.2f}%</b> today",
+        f"🏦 {format_market_cap(stock['market_cap'])} cap  ·  {_e(stock['sector'])}",
+    ]
+
+    if earnings_line:
+        lines += ["", earnings_line]
+
+    # Risk row
+    risk_parts = []
+    if stock.get("beta") is not None:
+        b = stock["beta"]
+        blabel = "High volatility" if b > 1.5 else ("Low volatility" if b < 0.8 else "Normal volatility")
+        risk_parts.append(f"Beta {b} ({blabel})")
+    if stock.get("short_interest") is not None:
+        si = stock["short_interest"]
+        si_label = "🔴 Squeeze risk!" if si > 20 else ("⚠️ Elevated" if si > 10 else "Normal")
+        risk_parts.append(f"Short {si}% float ({si_label})")
+    if risk_parts:
+        lines.append(f"📌 {_e('  ·  '.join(risk_parts))}")
+
+    # ── 52-Week range ─────────────────────────────────────────
+    lines += [
+        "",
+        DIV,
+        f"📅 <b>52-Week Range</b>",
+        f"   Low <b>${tech['week52_low']}</b>  {range_bar if range_desc else ''}  High <b>${tech['week52_high']}</b>",
+    ]
+    if range_desc:
+        lines.append(f"   {range_desc}  ·  <i>{_e(tech['high_label'])}</i>")
+
+    # ── Support / Resistance / ATR ────────────────────────────
+    if tech.get("support") and tech.get("resistance"):
+        lines += [
+            "",
+            f"🎯 <b>Key Levels</b>  <i>(20-day)</i>",
+            f"   🟢 Support    <b>${tech['support']}</b>  <i>{tech['pct_to_support']:+.1f}% below</i>",
+            f"   🔴 Resistance <b>${tech['resistance']}</b>  <i>{tech['pct_to_resist']:+.1f}% above</i>",
+        ]
+        if tech.get("atr"):
+            sl = round(price - tech["atr"] * 1.5, 2)
+            lines.append(f"   📐 ATR ±${tech['atr']}  →  <i>stop-loss ~${sl}</i>")
+
+    # ── Technical signals ─────────────────────────────────────
+    lines += [
+        "",
+        DIV,
+        "📈 <b>TECHNICAL ANALYSIS</b>",
+        "",
+        f"   RSI <b>{tech['rsi']}</b>  {_e(tech['rsi_label'])}",
+        f"   MACD   {_e(tech['macd_label'])}",
+        f"   Trend  {_e(tech['ma_label'] or 'Not enough data yet')}",
+    ]
+
+    bb = tech.get("bollinger", {})
+    if bb.get("signal"):
+        pct_b_str = f"  <i>({bb['pct_b']}% of band)</i>" if bb.get("pct_b") is not None else ""
+        lines.append(f"   BB     {_e(bb['signal'])}{pct_b_str}")
+
+    if tech.get("signals"):
+        lines += ["", "🚨 <b>Active Alerts</b>"]
+        for s in tech["signals"]:
+            lines.append(f"   {_e(s)}")
+
+    confidence = tech.get("confidence", "")
+    if confidence:
+        lines += ["", f"   🎖️ <b>Confidence:</b> {_e(confidence)}"]
+
+    # ── Fundamentals ──────────────────────────────────────────
+    lines += [
+        "",
+        DIV,
+        "📐 <b>COMPANY HEALTH</b>",
+        "",
+    ]
+    if fund["notes"]:
+        for note in fund["notes"]:
+            lines.append(f"   {_e(note)}")
+    else:
+        lines.append("   ⚠️ Fundamental data unavailable — check again later")
+
+    # ── News with clickable links ─────────────────────────────
+    lines += [
+        "",
+        DIV,
+        f"📰 <b>NEWS</b>  ·  {_e(sentiment['label'])}",
+        "<i>Tap any headline to read the full article</i>",
+        "",
+    ]
+    top_news = sentiment.get("scored", [])[:4]
+    if top_news:
+        for n in top_news:
+            title = _e(n["title"][:80])
+            url   = n.get("link", "")
+            label = _e(n.get("label", ""))
+            source = _e(n.get("source", ""))
+            source_str = f"  <i>{source}</i>" if source else ""
+            if url:
+                lines.append(f'   • <a href="{url}">{title}</a>{source_str}')
+            else:
+                lines.append(f"   • {title}{source_str}")
+            lines.append(f"     ↳ {label}")
+    else:
+        lines.append("   No news found today")
+
+    # ── Yahoo Social Interest ─────────────────────────────────
+    if reddit and reddit.get("available"):
+        lines += ["", DIV]
+        if reddit.get("mentions", 0) > 0 or reddit.get("is_trending"):
+            rank_str = f" (#{reddit['trend_rank']} trending)" if reddit.get("trend_rank") else ""
+            lines += [
+                f"📊 <b>SOCIAL INTEREST</b>  ·  {_e(reddit['hype_label'])}",
+                "",
+                f"   {_e(reddit['sentiment'])}{rank_str}",
+                f"   {_e(reddit.get('note', ''))}",
+                f'   <a href="https://finance.yahoo.com/quote/{ticker}">View on Yahoo Finance →</a>',
+            ]
+        else:
+            lines += [
+                f"📊 <b>SOCIAL INTEREST</b>  ·  🔇 Not trending today",
+                f'   <a href="https://finance.yahoo.com/quote/{ticker}">View on Yahoo Finance →</a>',
+            ]
+
+    # ── Investment Score ──────────────────────────────────────
+    score_bar = "🟩" * (composite // 10) + "⬜" * (10 - composite // 10)
+    lines += [
+        "",
+        DIV,
+        f"🎯 <b>INVESTMENT SCORE: {composite}/100</b>",
+        f"   {score_bar}",
+        f"   {score_label(composite)}",
+        "",
+        f"   <i>{_e(score_summary(composite, stock['ticker'], tech, fund, sentiment))}</i>",
+        DIV,
+        "",
+        "⚠️ <i>Educational only — not financial advice</i>",
+        "💡 /explain rsi  ·  /explain score  ·  /explain 52w",
+    ]
+
+    return "\n".join(lines)
 
 
-async def cmd_morning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manually trigger the morning brief on demand."""
-    import os
-    from telegram import Bot
-    from scheduler import send_morning_brief
-    await update.message.reply_text("🌅 Generating your morning brief… (3 messages, takes ~30s)")
-    try:
-        bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN", ""))
-        chat_id = str(update.effective_chat.id)
-        os.environ["TELEGRAM_CHAT_ID"] = chat_id
-        await send_morning_brief(bot)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Morning brief failed: {e}")
-
-
-async def cmd_evening(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manually trigger the closing report on demand."""
-    import os
-    from telegram import Bot
-    from scheduler import send_closing_report
-    await update.message.reply_text("📊 Generating closing report… (takes ~20s)")
-    try:
-        bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN", ""))
-        chat_id = str(update.effective_chat.id)
-        os.environ["TELEGRAM_CHAT_ID"] = chat_id
-        await send_closing_report(bot)
-    except Exception as e:
-        await update.message.reply_text(f"❌ Closing report failed: {e}")
+EXPLAIN_DICT = {
+    "rsi": (
+        "📊 <b>RSI — Relative Strength Index</b>\n\n"
+        "<b>Simple version:</b> RSI tells you if too many people are buying or selling a stock right now.\n\n"
+        "• <b>Below 30</b> 🟢 = Oversold — heavy selling happened. May be a buying opportunity.\n"
+        "  <i>Like a store clearance sale — but check WHY it's on sale.</i>\n"
+        "• <b>Above 70</b> 🔴 = Overbought — heavy buying happened. Stock may be due for a dip.\n"
+        "• <b>30–70</b> 🟡 = Normal range — no extreme signal.\n\n"
+        "📌 <b>Real example:</b> NVDA RSI dropped to 28 in Jan 2024 → it rallied 40% over the next 3 months."
+    ),
+    "macd": (
+        "📊 <b>MACD — Momentum Indicator</b>\n\n"
+        "<b>Simple version:</b> MACD shows whether a stock's speed (momentum) is increasing or decreasing.\n\n"
+        "• <b>Bullish crossover</b> 🟢 = Momentum turning positive. Like a car shifting into a higher gear.\n"
+        "• <b>Bearish crossover</b> 🔴 = Momentum slowing. The trend may be reversing.\n\n"
+        "📌 <b>Tip:</b> MACD crossovers are more powerful when the RSI also confirms the direction."
+    ),
+    "pe": (
+        "📊 <b>P/E Ratio — Price-to-Earnings</b>\n\n"
+        "<b>Simple version:</b> How many years of profit are you paying for?\n\n"
+        "• <b>P/E 10</b> = You pay $10 for every $1 of annual profit. Cheap.\n"
+        "• <b>P/E 20</b> = Fair value for most stable companies.\n"
+        "• <b>P/E 50+</b> = Very expensive — betting on future explosive growth.\n\n"
+        "📌 <b>Context matters:</b> AI/tech stocks often have P/E 40–100 because investors expect massive growth."
+    ),
+    "52w": (
+        "📊 <b>52-Week High &amp; Low</b>\n\n"
+        "<b>Simple version:</b> The highest and lowest price over the past 12 months.\n\n"
+        "• <b>Near 52W High</b> 🚀 = Stock is at its strongest point in a year. Strong momentum.\n"
+        "• <b>Near 52W Low</b> ⚠️ = Stock is at its weakest point. Could be a bargain — or still falling.\n\n"
+        "📌 <b>Tip:</b> A breakout above the 52W high (on high volume) is one of the strongest buy signals traders use."
+    ),
+    "golden": (
+        "📊 <b>Golden Cross &amp; Death Cross</b>\n\n"
+        "These compare the 50-day and 200-day moving averages.\n\n"
+        "• <b>Golden Cross</b> 🌙 = 50-day crosses ABOVE 200-day. Historically bullish — long-term uptrend.\n"
+        "• <b>Death Cross</b> ☠️ = 50-day crosses BELOW 200-day. Historically bearish — downtrend warning.\n\n"
+        "📌 <b>History:</b> The S&amp;P 500 golden cross in late 2023 preceded a 25% rally."
+    ),
+    "volume": (
+        "📊 <b>Volume Spike</b>\n\n"
+        "<b>Simple version:</b> Way more shares than normal were traded today.\n\n"
+        "• <b>2x+ normal volume on UP day</b> 🟢 = Strong buying conviction — institutional money moving in.\n"
+        "• <b>2x+ normal volume on DOWN day</b> 🔴 = Heavy selling — possible panic or bad news.\n\n"
+        "📌 <b>Rule of thumb:</b> Never trust a price move without checking if volume confirms it."
+    ),
+    "sentiment": (
+        "📊 <b>News Sentiment</b>\n\n"
+        "<b>Simple version:</b> The bot reads today's headlines and scores the mood.\n\n"
+        "• <b>Bullish</b> 🟢 = Headlines are mostly positive about the company\n"
+        "• <b>Bearish</b> 🔴 = More negative news than positive\n"
+        "• <b>Neutral</b> 🟡 = Mixed or no significant news today\n\n"
+        "📌 <b>Tip:</b> Sentiment changes fast. Check again after earnings or major news events."
+    ),
+    "score": (
+        "📊 <b>Investment Score (0–100)</b>\n\n"
+        "The bot combines 4 signals into one easy score:\n\n"
+        "• 30% Technical (RSI, MACD, Moving Averages)\n"
+        "• 25% Fundamental (P/E, revenue growth, EPS)\n"
+        "• 20% Sentiment (news headlines mood)\n"
+        "• 25% Momentum (price trend, volume)\n\n"
+        "🟢 <b>70–100</b> = Strong Buy Signal\n"
+        "🟡 <b>50–70</b>  = Worth watching\n"
+        "🟠 <b>30–50</b>  = Mixed — hold off\n"
+        "🔴 <b>0–30</b>   = Avoid for now\n\n"
+        "📌 <b>Important:</b> No score is a guarantee. Always do your own research."
+    ),
+    "bb": (
+        "📊 <b>Bollinger Bands</b>\n\n"
+        "<b>Simple version:</b> A price channel showing normal vs extreme price moves.\n\n"
+        "• <b>At Lower Band</b> 🟢 = Price is unusually low — possible bounce zone.\n"
+        "• <b>At Upper Band</b> 🔴 = Price is unusually high — possible pullback zone.\n"
+        "• <b>Mid-Band</b> = Normal territory — no strong signal.\n\n"
+        "📌 <b>Power tip:</b> When RSI &lt; 35 AND price touches the lower band at the same time → "
+        "that's a high-confidence oversold signal. Both indicators agreeing = stronger signal."
+    ),
+    "reddit": (
+        "📊 <b>Social Interest — Yahoo Finance Trending</b>\n\n"
+        "<b>Simple version:</b> Is this stock one of the most-searched tickers on Yahoo Finance right now?\n\n"
+        "• <b>Trending #1–3</b> 🚀 = Extremely high retail attention today\n"
+        "• <b>Trending #4–10</b> 🔥 = High interest — many people researching this stock\n"
+        "• <b>Moderate</b> 💬 = Normal chatter — not a strong signal alone\n"
+        "• <b>Not trending</b> 🔇 = Below the radar today\n\n"
+        "📌 <b>Why Yahoo trending matters:</b>\n"
+        "   When retail investors research a stock, they often search Yahoo Finance first.\n"
+        "   A spike in trending rank often precedes a price move.\n"
+        "   Combined with Bullish news sentiment = strong retail momentum signal.\n\n"
+        "⚠️ <b>Warning:</b> Trending ≠ good investment. Always check RSI + fundamentals too."
+    ),
+}
 
