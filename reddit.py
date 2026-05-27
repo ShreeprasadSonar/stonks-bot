@@ -226,6 +226,45 @@ def format_reddit_report(ticker: str, data: dict) -> str:
     return "\n".join(lines)
 
 
+def get_yahoo_trending(limit: int = 20) -> list:
+    """Alias for get_trending_tickers — used by scheduler."""
+    return get_trending_tickers(limit)
+
+
+def get_dynamic_tickers(base_limit: int = 20, extra_trending: int = 15) -> list:
+    """
+    Build a dynamic ticker list by merging:
+      1. Yahoo Finance trending tickers (live retail attention)
+      2. Base SECTORS tickers (core sector anchors as fallback)
+
+    Result is deduplicated, trending stocks come first so they score highest
+    in the movers sort. Caps at ~35 tickers to keep runtime reasonable.
+    """
+    from config import SECTORS
+
+    base_tickers  = [t for tickers in SECTORS.values() for t in tickers]
+    trend_tickers = get_trending_tickers(extra_trending)
+
+    # Filter trending to equity-looking symbols (skip crypto/ETFs like BTC-USD, SPY)
+    SKIP = {"SPY", "QQQ", "DIA", "IWM", "VIX", "GLD", "SLV", "USO", "TLT"}
+    trend_clean = [
+        t for t in trend_tickers
+        if t.isalpha() and len(t) <= 5 and t.upper() not in SKIP
+    ]
+
+    # Trending first, then base (deduped)
+    seen  = set()
+    final = []
+    for t in trend_clean + base_tickers:
+        if t.upper() not in seen:
+            seen.add(t.upper())
+            final.append(t.upper())
+
+    logger.info(f"Dynamic tickers ({len(final)}): {final[:12]}… "
+                f"({len(trend_clean)} from trending, {len(base_tickers)} base)")
+    return final[:base_limit + extra_trending]   # cap at ~35
+
+
 def _no_data(ticker: str, reason: str) -> dict:
     return {
         "ticker":        ticker,
