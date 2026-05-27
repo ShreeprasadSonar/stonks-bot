@@ -1,360 +1,627 @@
-"""Main entry point for StockBot — with smart political news monitor."""
-import logging
-import os
-import asyncio
+"""Format analysis results into clean, professional Telegram messages (HTML mode)."""
 import html as _html
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, Application
-from telegram.constants import ParseMode
-from telegram.error import NetworkError, TimedOut
+from fetcher import format_market_cap
+
+CT  = ZoneInfo("America/Chicago")
+DIV = "─────────────────────"
 
 
-from config import TELEGRAM_TOKEN, SECTORS
-from commands import (
-    cmd_start, cmd_help, cmd_analyze, cmd_sector,
-    cmd_trending, cmd_political, cmd_explain,
-    cmd_watch, cmd_unwatch, cmd_watchlist, cmd_reddit,
-    cmd_morning, cmd_evening, cmd_button_callback,
-)
-from news import get_news
-
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-    level=logging.INFO,
-)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.WARNING)
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
-logging.getLogger("yfinance").setLevel(logging.WARNING)
-
-logger = logging.getLogger("StockBot")
-
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-CT = ZoneInfo("America/Chicago")
-
-_seen_political: set = set()
-_alert_cooldowns: dict = {}   # ticker → datetime of last alert
-
-# ── Impact scoring: higher = more important, only alert if score >= ALERT_THRESHOLD
-ALERT_THRESHOLD = 7
-
-IMPACT_SOURCES = {
-    # CRITICAL (9-10) — market-moving tier
-    "president":        10,
-    "white house":      10,
-    "trump":            10,
-    "biden":            10,
-    "harris":           9,
-    "federal reserve":  9,
-    "powell":           9,   # Fed Chair — interest rates move entire market
-    # HIGH (7-8) — significant regulatory/legal
-    "sec ":             8,   # space to avoid "sector"
-    "doj":              8,
-    "antitrust":        8,
-    "executive order":  8,
-    "congress":         7,
-    "senate":           7,
-    "senator":          7,
-    "treasury":         7,
-    "tariff":           7,
-    # MEDIUM (5-6) — notable but less urgent
-    "musk":             6,
-    "pentagon":         6,
-    "regulation":       5,
-    "subsidy":          5,
-    "contract":         5,
-    # LOW (1-4) — skip these
-    "government":       3,
-    "federal":          3,
-    "official":         2,
-}
-
-# Positive/negative impact words
-POSITIVE_WORDS = ["support", "invest", "approve", "buy", "boost", "win",
-                  "deal", "partnership", "subsidy", "contract", "award", "fund"]
-NEGATIVE_WORDS = ["ban", "sanction", "fine", "sue", "block", "tariff",
-                  "tax", "investigate", "probe", "restrict", "halt", "warn"]
-
-ALL_TICKERS = [(t, sector) for sector, tickers in SECTORS.items() for t in tickers]
+def ct_now_str() -> str:
+    return datetime.now(CT).strftime("%a %b %d · %I:%M %p CT")
 
 
-def score_political_impact(title: str) -> tuple[int, str, str]:
-    """
-    Returns (impact_score, source_label, sentiment_label).
-    Only alert if impact_score >= ALERT_THRESHOLD.
-    """
-    title_lower = title.lower()
-    max_score   = 0
-    source      = ""
-
-    for keyword, score in IMPACT_SOURCES.items():
-        if keyword in title_lower and score > max_score:
-            max_score = score
-            source    = keyword.strip().title()
-
-    # Sentiment
-    positive = sum(1 for w in POSITIVE_WORDS if w in title_lower)
-    negative = sum(1 for w in NEGATIVE_WORDS if w in title_lower)
-    if positive > negative:
-        sentiment = "🟢 Likely Positive for stock"
-    elif negative > positive:
-        sentiment = "🔴 Likely Negative for stock"
-    else:
-        sentiment = "🟡 Impact unclear — monitor closely"
-
-    return max_score, source, sentiment
+def _e(text) -> str:
+    return _html.escape(str(text))
 
 
-def impact_badge(score: int) -> str:
-    if score >= 9:  return "🚨 CRITICAL"
-    if score >= 7:  return "⚠️ HIGH IMPACT"
-    if score >= 5:  return "📌 NOTABLE"
-    return "ℹ️ LOW"
+def score_label(score: int) -> str:
+    if score >= 70: return "🟢 Strong Signal"
+    if score >= 50: return "🟡 Watch Closely"
+    if score >= 30: return "🟠 Mixed — Hold Off"
+    return "🔴 Avoid"
 
 
-def ct_now() -> str:
-    return datetime.now(CT).strftime("%a %b %d, %I:%M %p CT")
+def score_summary(score: int, ticker: str, tech: dict, fund: dict, sentiment: dict) -> str:
+    reasons = []
+    if tech["score"] >= 60:
+        reasons.append("charts are bullish")
+    elif tech["score"] <= 35:
+        reasons.append("charts look weak")
+    if fund["score"] >= 60:
+        reasons.append("financials are strong")
+    elif fund["score"] <= 35:
+        reasons.append("earnings/growth look soft")
+    sent_score = max(0, min(100, (sentiment["score"] + 1) * 50))
+    if sent_score >= 60:
+        reasons.append("news is positive")
+    elif sent_score <= 35:
+        reasons.append("news is mostly negative")
+    if not reasons:
+        return f"Signals are mixed for {ticker} — no clear edge right now."
+    return f"{ticker} scores {score}/100 — {', '.join(reasons)}."
 
 
-async def political_news_monitor(app: Application):
-    """Background task — checks every 20 min, only alerts on high-impact news."""
-    logger.info("🏛️ Political monitor started — threshold: impact >= 7 only")
-    while True:
-        try:
-            for ticker, sector in ALL_TICKERS:
-                articles = get_news(ticker, limit=15)
-                for a in articles:
-                    title_lower = a["title"].lower()
-                    impact, source, sentiment = score_political_impact(title_lower)
+def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, reddit: dict = None) -> str:
+    ticker    = _e(stock["ticker"])
+    name      = _e(stock["name"])
+    price     = stock["price"]
+    chg       = stock["change_pct"]
+    chg_emoji = "▲" if chg >= 0 else "▼"
+    chg_color = "+" if chg >= 0 else ""
 
-                    if impact < ALERT_THRESHOLD:
-                        continue  # Skip low-level mentions silently
+    composite = int(
+        tech["score"]  * 0.30 +
+        fund["score"]  * 0.25 +
+        max(0, min(100, (sentiment["score"] + 1) * 50)) * 0.20 +
+        50             * 0.25
+    )
 
-                    key = a["title"][:80]
-                    if key in _seen_political:
-                        continue
-                    _seen_political.add(key)
+    # 52W range bar
+    try:
+        w52_hi = float(tech["week52_high"])
+        w52_lo = float(tech["week52_low"])
+        pct_of_range = ((price - w52_lo) / (w52_hi - w52_lo) * 100) if w52_hi != w52_lo else 50
+        blocks    = int(pct_of_range / 10)
+        range_bar = "▓" * blocks + "░" * (10 - blocks)
+    except Exception:
+        range_bar    = ""
+        pct_of_range = 0
 
-                    # Cooldown: suppress same ticker alerts within 4 hours
-                    from datetime import timedelta, timezone
-                    now_utc = datetime.now(timezone.utc)
-                    last_alert = _alert_cooldowns.get(ticker)
-                    if last_alert and (now_utc - last_alert) < timedelta(hours=4):
-                        logger.info(f"[{ticker}] Cooldown active — skipping alert (last: {last_alert})")
-                        continue
-                    _alert_cooldowns[ticker] = now_utc
+    # Earnings alert
+    earnings_line = ""
+    try:
+        ed = stock.get("earnings_date")
+        if ed:
+            from datetime import datetime as _dt, timezone
+            if hasattr(ed, "to_pydatetime"):
+                ed = ed.to_pydatetime()
+            now      = _dt.now(timezone.utc)
+            ed_aware = ed.replace(tzinfo=timezone.utc) if ed.tzinfo is None else ed
+            days     = (ed_aware - now).days
+            if days <= 0:
+                earnings_line = "⚡ <b>Earnings just passed</b> — watch for post-earnings move"
+            elif days <= 7:
+                earnings_line = f"🚨 <b>Earnings in {days}d</b> — price can swing ±20%+"
+            elif days <= 14:
+                earnings_line = f"📅 <b>Earnings in {days}d</b> — stocks often run up beforehand"
+    except Exception:
+        pass
 
-                    badge = impact_badge(impact)
-
-                    if impact >= 9:
-                        why = f"{source} statements move markets immediately."
-                    elif impact >= 7:
-                        why = f"{source} has authority to affect this company through regulation or legislation."
-                    else:
-                        why = f"Notable mention — monitor for follow-up action."
-
-                    msg = (
-                        f"<b>{badge} — {ticker}</b>\n"
-                        f"─────────────────────\n\n"
-                        f"{_html.escape(a['title'])}\n\n"
-                        f"<b>Source:</b> {_html.escape(source)}  ·  Impact {impact}/10\n"
-                        f"<b>Signal:</b> {_html.escape(sentiment)}\n"
-                        f"<i>{ct_now()}</i>\n\n"
-                        f"{_html.escape(why)}\n\n"
-                        f"/analyze {ticker}"
-                    )
-                    if CHAT_ID:
-                        await app.bot.send_message(
-                            chat_id=CHAT_ID, text=msg,
-                            parse_mode=ParseMode.HTML,
-                            disable_web_page_preview=True
-                        )
-                        logger.info(f"🏛️ [{badge}] Political alert sent — {ticker}: {a['title'][:60]}")
-
-                await asyncio.sleep(0.5)
-
-        except Exception as e:
-            logger.error(f"Political monitor error: {e}")
-
-        logger.info("🏛️ Political check done — next in 20 min")
-        await asyncio.sleep(1200)  # 20 minutes
-
-
-async def send_live_snapshot(app: Application):
-    """Fetch and send a live market snapshot ~30s after startup."""
-    await asyncio.sleep(5)
-    logger.info("📊 Fetching live startup snapshot...")
-
-    from fetcher import get_stock_info
-    from technical import get_technical_signals
-    from sentiment import score_news
-    from news import get_news as fetch_news
-
-    SNAPSHOT_TICKERS = ["NVDA", "MSFT", "AMD"]
-
+    # ── Header
     lines = [
-        "<b>Live Snapshot</b>",
-        f"<i>{ct_now()}</i>",
-        "─────────────────────",
-        "",
+        f"<b>{name}</b>  <code>{ticker}</code>",
+        f"<i>{ct_now_str()}</i>",
+        DIV,
+        f"<b>${price}</b>  {chg_emoji} <b>{chg_color}{chg:.2f}%</b>",
+        f"{format_market_cap(stock['market_cap'])} cap  ·  {_e(stock['sector'])}",
     ]
 
-    any_success = False
-    for ticker in SNAPSHOT_TICKERS:
-        try:
-            stock = get_stock_info(ticker)
-            if "error" in stock:
-                lines.append(f"  <i>{ticker}: data unavailable</i>")
-                continue
+    if earnings_line:
+        lines += ["", earnings_line]
 
-            chg      = stock["change_pct"]
-            arrow    = "▲" if chg >= 0 else "▼"
-            vol_flag = "  ⚡" if stock["volume_ratio"] > 3 else ""
+    # Risk row
+    risk_parts = []
+    if stock.get("beta") is not None:
+        b      = stock["beta"]
+        blabel = "high vol" if b > 1.5 else ("low vol" if b < 0.8 else "normal vol")
+        risk_parts.append(f"β {b} ({blabel})")
+    if stock.get("short_interest") is not None:
+        si = stock["short_interest"]
+        si_label = "🔴 squeeze risk" if si > 20 else ("⚠️ elevated" if si > 10 else "normal")
+        risk_parts.append(f"Short {si}% ({si_label})")
+    if risk_parts:
+        lines.append(f"<i>{_e('  ·  '.join(risk_parts))}</i>")
 
-            tech = get_technical_signals(stock["history"])
-
-            rsi_note = ""
-            if tech["rsi"]:
-                if tech["rsi"] < 30:
-                    rsi_note = f"  🟢 RSI {tech['rsi']} — oversold"
-                elif tech["rsi"] > 70:
-                    rsi_note = f"  🔴 RSI {tech['rsi']} — overbought"
-
-            articles = fetch_news(ticker, limit=5)
-            sent     = score_news(articles)
-
-            lines.append(
-                f"<b>{ticker}</b>  ${stock['price']}  {arrow} {chg:+.2f}%{vol_flag}\n"
-                f"  52W  ${stock['week52_low']} – ${stock['week52_high']}{rsi_note}\n"
-                f"  News  {sent['label']}"
-            )
-            any_success = True
-
-        except Exception as e:
-            logger.error(f"Snapshot failed for {ticker}: {e}")
-
+    # ── 52W Range
     lines += [
         "",
-        "─────────────────────",
-        "/analyze NVDA  ·  /trending",
+        DIV,
+        f"<b>52-Week Range</b>",
+        f"  <code>${tech['week52_low']}</code>  {range_bar}  <code>${tech['week52_high']}</code>",
+        f"  <i>{pct_of_range:.0f}% of yearly range · {_e(tech['high_label'])}</i>",
     ]
 
-    if any_success:
-        await app.bot.send_message(chat_id=CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML)
-        logger.info("✅ Live startup snapshot sent")
+    # Support / Resistance / ATR
+    if tech.get("support") and tech.get("resistance"):
+        lines += [
+            "",
+            f"<b>Key Levels</b>",
+            f"  🟢 Support    <b>${tech['support']}</b>  <i>({tech['pct_to_support']:+.1f}%)</i>",
+            f"  🔴 Resistance <b>${tech['resistance']}</b>  <i>({tech['pct_to_resist']:+.1f}%)</i>",
+        ]
+        if tech.get("atr"):
+            sl = round(price - tech["atr"] * 1.5, 2)
+            lines.append(f"  📐 ATR ±${tech['atr']}  ·  stop-loss ~<b>${sl}</b>")
+
+    # ── Technicals
+    lines += [
+        "",
+        DIV,
+        "<b>TECHNICALS</b>",
+        "",
+        f"  RSI    <b>{tech['rsi']}</b>  ·  {_e(tech['rsi_label'])}",
+        f"  MACD   {_e(tech['macd_label'])}",
+        f"  Trend  {_e(tech['ma_label'] or 'Insufficient data')}",
+    ]
+
+    bb = tech.get("bollinger", {})
+    if bb.get("signal"):
+        pct_b_str = f"  <i>({bb['pct_b']}% of band)</i>" if bb.get("pct_b") is not None else ""
+        lines.append(f"  BB     {_e(bb['signal'])}{pct_b_str}")
+
+    if tech.get("signals"):
+        lines += ["", "<b>Active Alerts</b>"]
+        for s in tech["signals"]:
+            lines.append(f"  {_e(s)}")
+
+    if tech.get("confidence"):
+        lines.append(f"  <i>Confidence: {_e(tech['confidence'])}</i>")
+
+    # ── Company Health
+    lines += ["", DIV, "<b>COMPANY HEALTH</b>", ""]
+    if fund["notes"]:
+        for note in fund["notes"]:
+            lines.append(f"  {_e(note)}")
     else:
-        await app.bot.send_message(
-            chat_id=CHAT_ID,
-            text="Data unavailable at startup — Yahoo Finance may be rate-limiting.\nTry /analyze NVDA in 60 seconds.",
-            parse_mode=ParseMode.HTML,
-        )
+        lines.append("  Data unavailable — try again shortly")
 
+    # ── News
+    lines += [
+        "",
+        DIV,
+        f"<b>NEWS</b>  ·  {_e(sentiment['label'])}",
+        "",
+    ]
+    top_news = sentiment.get("scored", [])[:4]
+    if top_news:
+        for n in top_news:
+            title  = _e(n["title"][:85])
+            url    = n.get("link", "")
+            source = _e(n.get("source", ""))
+            label  = _e(n.get("label", ""))
+            src_str = f"  <i>{source}</i>" if source else ""
+            if url:
+                lines.append(f'  • <a href="{url}">{title}</a>{src_str}')
+            else:
+                lines.append(f"  • {title}{src_str}")
+            lines.append(f"    {label}")
+    else:
+        lines.append("  No news found today")
 
-async def send_startup_message(app: Application):
-    """Send startup report + live snapshot + launch background tasks."""
-    logger.info("🟢 StockBot startup sequence initiated")
-
-    # Register commands so Telegram shows the autocomplete menu when user types /
-    from telegram import BotCommand
-    try:
-        await app.bot.set_my_commands([
-            BotCommand("analyze",   "Full analyst report — /analyze NVDA"),
-            BotCommand("trending",  "Today's top momentum stocks"),
-            BotCommand("sector",    "Sector movers — /sector AI"),
-            BotCommand("morning",   "Trigger morning market brief now"),
-            BotCommand("evening",   "Trigger closing report now"),
-            BotCommand("political", "Political signals — /political NVDA"),
-            BotCommand("reddit",    "Yahoo trending + social interest — /reddit NVDA"),
-            BotCommand("watch",     "Add to watchlist — /watch NVDA"),
-            BotCommand("unwatch",   "Remove from watchlist — /unwatch NVDA"),
-            BotCommand("watchlist", "View your saved stocks"),
-            BotCommand("explain",   "Learn a metric — /explain rsi"),
-            BotCommand("help",      "Show all commands"),
-            BotCommand("start",     "Welcome message"),
-        ])
-        logger.info("✅ Bot commands registered (autocomplete menu active)")
-    except Exception as e:
-        logger.warning(f"Could not set bot commands: {e}")
-
-    if not CHAT_ID:
-        logger.warning("⚠️ TELEGRAM_CHAT_ID not set — add it as a GitHub Secret")
-        asyncio.create_task(political_news_monitor(app))
-        return
-
-    msg = (
-        "<b>StockBot</b> is live\n"
-        f"<i>{ct_now()}</i>\n"
-        "─────────────────────\n\n"
-        "<b>Commands</b>\n"
-        "  /analyze NVDA — full analyst report\n"
-        "  /sector AI — sector movers\n"
-        "  /trending — top momentum stocks\n"
-        "  /political NVDA — political signals\n"
-        "  /reddit NVDA — social interest\n"
-        "  /watch NVDA · /watchlist\n"
-        "  /explain rsi — metric guide\n\n"
-        "<b>Political Monitor</b>  active\n"
-        "  Alerts only for: President, Fed Chair, SEC, Congress\n\n"
-        "<b>Scheduled Briefs</b>  (GitHub Actions)\n"
-        "  🌅 8:00 AM CT Mon–Fri — pre-market\n"
-        "  📊 4:30 PM CT Mon–Fri — closing\n"
-        "  📅 Sunday 9:00 AM CT — weekly\n\n"
-        "<i>Fetching live snapshot…</i>"
-    )
-    await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.HTML)
-    logger.info(f"✅ Startup message sent to chat {CHAT_ID}")
-
-    asyncio.create_task(political_news_monitor(app))
-    asyncio.create_task(send_live_snapshot(app))
-    logger.info("✅ Background tasks launched")
-
-
-def main():
-    if not TELEGRAM_TOKEN:
-        raise ValueError("❌ TELEGRAM_BOT_TOKEN not set. Add it as a GitHub Secret.")
-
-    logger.info("Initializing StockBot...")
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_TOKEN)
-        .read_timeout(30)
-        .write_timeout(30)
-        .connect_timeout(30)
-        .post_init(send_startup_message)
-        .build()
-    )
-
-    # ── Error handler: silently retry transient network drops ────────────
-    async def error_handler(update, context):
-        err = context.error
-        if isinstance(err, (NetworkError, TimedOut)):
-            # GitHub Actions network blips — normal, bot auto-retries
-            logger.warning(f"⚠️ Network blip (auto-retrying): {err.__class__.__name__}")
+    # ── Social Interest
+    if reddit and reddit.get("available"):
+        lines += ["", DIV, "<b>SOCIAL INTEREST</b>", ""]
+        if reddit.get("is_trending"):
+            rank = reddit.get("trend_rank")
+            rank_str = f"  ·  #{rank} on Yahoo Finance" if rank else ""
+            lines += [
+                f"  {_e(reddit['hype_label'])}{rank_str}",
+                f"  {_e(reddit['sentiment'])}",
+                f'  <a href="https://finance.yahoo.com/quote/{ticker}">Yahoo Finance →</a>',
+            ]
         else:
-            logger.error(f"❌ Unhandled error: {err}", exc_info=context.error)
+            lines += [
+                f"  🔇 Not in today's trending list",
+                f'  <a href="https://finance.yahoo.com/quote/{ticker}">Yahoo Finance →</a>',
+            ]
 
-    app.add_error_handler(error_handler)
-    # ─────────────────────────────────────────────────────────────────────
+    # ── Score
+    score_bar = "█" * (composite // 10) + "░" * (10 - composite // 10)
+    lines += [
+        "",
+        DIV,
+        f"<b>SCORE  {composite}/100</b>",
+        f"  <code>{score_bar}</code>  {score_label(composite)}",
+        f"  <i>{_e(score_summary(composite, stock['ticker'], tech, fund, sentiment))}</i>",
+        DIV,
+        f"<i>/analyze /trending /sector /explain</i>",
+    ]
 
-    app.add_handler(CommandHandler("start",     cmd_start))
-    app.add_handler(CommandHandler("help",      cmd_help))
-    app.add_handler(CommandHandler("analyze",   cmd_analyze))
-    app.add_handler(CommandHandler("sector",    cmd_sector))
-    app.add_handler(CommandHandler("trending",  cmd_trending))
-    app.add_handler(CommandHandler("political", cmd_political))
-    app.add_handler(CommandHandler("explain",   cmd_explain))
-    app.add_handler(CommandHandler("watch",     cmd_watch))
-    app.add_handler(CommandHandler("unwatch",   cmd_unwatch))
-    app.add_handler(CommandHandler("watchlist", cmd_watchlist))
-    app.add_handler(CommandHandler("reddit",    cmd_reddit))
-    app.add_handler(CommandHandler("morning",   cmd_morning))
-    app.add_handler(CommandHandler("evening",   cmd_evening))
-    app.add_handler(CallbackQueryHandler(cmd_button_callback))  # inline button taps
-
-    logger.info("✅ StockBot running — listening for commands")
-    app.run_polling(drop_pending_updates=True)
+    return "\n".join(lines)
 
 
-if __name__ == "__main__":
-    main()
+EXPLAIN_DICT = {
+    "rsi": (
+        "<b>RSI — Relative Strength Index</b>\n\n"
+        "Tells you if a stock is being bought or sold too aggressively.\n\n"
+        "• <b>&lt; 30</b> 🟢 Oversold — heavy selling. Possible bounce zone.\n"
+        "• <b>&gt; 70</b> 🔴 Overbought — heavy buying. Pullback may follow.\n"
+        "• <b>30–70</b> 🟡 Normal — no extreme signal.\n\n"
+        "<b>Example:</b> NVDA RSI hit 28 in Jan 2024 → rallied 40% over the next 3 months."
+    ),
+    "macd": (
+        "<b>MACD — Momentum Indicator</b>\n\n"
+        "Shows whether a stock's price momentum is accelerating or fading.\n\n"
+        "• <b>Bullish crossover</b> 🟢 Momentum turning positive.\n"
+        "• <b>Bearish crossover</b> 🔴 Momentum slowing — trend may reverse.\n\n"
+        "<b>Tip:</b> MACD crossovers are stronger when RSI confirms the same direction."
+    ),
+    "pe": (
+        "<b>P/E Ratio — Price-to-Earnings</b>\n\n"
+        "How many years of profit you're paying for today.\n\n"
+        "• <b>P/E 10</b> — $10 per $1 annual profit. Cheap.\n"
+        "• <b>P/E 20</b> — Fair value for stable companies.\n"
+        "• <b>P/E 50+</b> — Expensive. Market expects explosive growth.\n\n"
+        "<b>Note:</b> AI/tech stocks often carry P/E 40–100 due to growth expectations."
+    ),
+    "52w": (
+        "<b>52-Week High &amp; Low</b>\n\n"
+        "The highest and lowest prices over the past 12 months.\n\n"
+        "• Near <b>52W High</b> 🚀 Strong momentum — stock at peak strength.\n"
+        "• Near <b>52W Low</b> ⚠️ At weakest point — bargain or still falling?\n\n"
+        "<b>Tip:</b> A breakout above the 52W high on high volume = one of the strongest buy signals."
+    ),
+    "golden": (
+        "<b>Golden Cross &amp; Death Cross</b>\n\n"
+        "Compares the 50-day and 200-day moving averages.\n\n"
+        "• <b>Golden Cross</b> 🌙 50-day crosses above 200-day → bullish long-term.\n"
+        "• <b>Death Cross</b> ☠️ 50-day crosses below 200-day → downtrend warning.\n\n"
+        "<b>History:</b> The S&P 500 golden cross in late 2023 preceded a 25% rally."
+    ),
+    "volume": (
+        "<b>Volume Spike</b>\n\n"
+        "Way more shares traded than normal — institutional money is moving.\n\n"
+        "• <b>2x+ on UP day</b> 🟢 Strong conviction buying.\n"
+        "• <b>2x+ on DOWN day</b> 🔴 Heavy selling — possible panic.\n\n"
+        "<b>Rule:</b> Never trust a price move that isn't backed by volume."
+    ),
+    "sentiment": (
+        "<b>News Sentiment</b>\n\n"
+        "The bot reads today's headlines and scores the overall mood.\n\n"
+        "• <b>Bullish</b> 🟢 Headlines are mostly positive.\n"
+        "• <b>Bearish</b> 🔴 More negative news than positive.\n"
+        "• <b>Neutral</b> 🟡 Mixed or no significant news.\n\n"
+        "<b>Tip:</b> Sentiment changes fast. Recheck after earnings or major announcements."
+    ),
+    "score": (
+        "<b>Investment Score (0–100)</b>\n\n"
+        "Four signals combined into one number:\n\n"
+        "  30% Technical  (RSI, MACD, moving averages)\n"
+        "  25% Fundamental  (P/E, revenue, EPS)\n"
+        "  20% Sentiment  (news headline mood)\n"
+        "  25% Momentum  (price trend, volume)\n\n"
+        "🟢 <b>70–100</b>  Strong signal\n"
+        "🟡 <b>50–70</b>   Worth watching\n"
+        "🟠 <b>30–50</b>   Mixed — hold off\n"
+        "🔴 <b>0–30</b>    Avoid for now"
+    ),
+    "bb": (
+        "<b>Bollinger Bands</b>\n\n"
+        "A price channel showing normal vs extreme moves.\n\n"
+        "• <b>At lower band</b> 🟢 Price unusually low — possible bounce.\n"
+        "• <b>At upper band</b> 🔴 Price unusually high — possible pullback.\n"
+        "• <b>Mid-band</b> Normal territory.\n\n"
+        "<b>Power combo:</b> RSI &lt; 35 <i>and</i> price at lower band = high-confidence oversold signal."
+    ),
+    "reddit": (
+        "<b>Social Interest — Yahoo Finance Trending</b>\n\n"
+        "Is this stock in the most-searched tickers on Yahoo Finance right now?\n\n"
+        "• <b>#1–3</b> 🚀 Extremely high retail attention\n"
+        "• <b>#4–10</b> 🔥 High interest — people are researching it\n"
+        "• <b>Not trending</b> 🔇 Below the radar today\n\n"
+        "<b>Why it matters:</b> A spike in trending rank often precedes a price move — especially when combined with bullish news."
+    ),
+}
+
+
+
+def score_label(score: int) -> str:
+    if score >= 70: return "🟢 Strong Buy Signal"
+    if score >= 50: return "🟡 Watch — Worth Monitoring"
+    if score >= 30: return "🟠 Hold — Mixed Signals"
+    return "🔴 Avoid — Bearish Signs"
+
+
+def score_summary(score: int, ticker: str, tech: dict, fund: dict, sentiment: dict) -> str:
+    """One-sentence plain-English explanation of the score."""
+    reasons = []
+    if tech["score"] >= 60:
+        reasons.append("technical charts are looking bullish")
+    elif tech["score"] <= 35:
+        reasons.append("technical charts look weak")
+    if fund["score"] >= 60:
+        reasons.append("the company's financials are strong")
+    elif fund["score"] <= 35:
+        reasons.append("earnings/growth look concerning")
+    sent_score = max(0, min(100, (sentiment["score"] + 1) * 50))
+    if sent_score >= 60:
+        reasons.append("recent news is mostly positive")
+    elif sent_score <= 35:
+        reasons.append("news headlines are mostly negative")
+    if not reasons:
+        return f"Signals are mixed for {ticker} — monitor closely before acting."
+    return f"{ticker} scores {score}/100 because {', and '.join(reasons)}."
+
+
+def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, reddit: dict = None) -> str:
+    """
+    Returns an HTML-formatted report for Telegram (use ParseMode.HTML).
+    News headlines are embedded hyperlinks — tap to read the full article.
+    """
+    ticker    = _e(stock["ticker"])
+    name      = _e(stock["name"])
+    price     = stock["price"]
+    chg       = stock["change_pct"]
+    chg_emoji = "📈" if chg >= 0 else "📉"
+    chg_color = "+" if chg >= 0 else ""
+
+    composite = int(
+        tech["score"]  * 0.30 +
+        fund["score"]  * 0.25 +
+        max(0, min(100, (sentiment["score"] + 1) * 50)) * 0.20 +
+        50             * 0.25
+    )
+
+    # ── 52W range bar ─────────────────────────────────────────
+    try:
+        w52_hi = float(tech["week52_high"])
+        w52_lo = float(tech["week52_low"])
+        pct_of_range = ((price - w52_lo) / (w52_hi - w52_lo) * 100) if w52_hi != w52_lo else 50
+        blocks   = int(pct_of_range / 10)
+        range_bar = "▓" * blocks + "░" * (10 - blocks)
+        range_desc = f"{range_bar}  <i>{pct_of_range:.0f}% of yearly range</i>"
+    except Exception:
+        range_desc = ""
+
+    # ── Earnings warning ──────────────────────────────────────
+    earnings_line = ""
+    try:
+        ed = stock.get("earnings_date")
+        if ed:
+            from datetime import datetime as _dt, timezone
+            if hasattr(ed, "to_pydatetime"):
+                ed = ed.to_pydatetime()
+            now      = _dt.now(timezone.utc)
+            ed_aware = ed.replace(tzinfo=timezone.utc) if ed.tzinfo is None else ed
+            days     = (ed_aware - now).days
+            if days <= 0:
+                earnings_line = "⚠️ <b>Earnings just passed</b> — watch for post-earnings move"
+            elif days <= 7:
+                earnings_line = f"🚨 <b>Earnings in {days} days</b> — HIGH RISK. Price can swing ±20%+"
+            elif days <= 14:
+                earnings_line = f"⚠️ <b>Earnings in {days} days</b> — stocks often run up beforehand"
+            else:
+                earnings_line = f"📅 Next earnings: ~{days} days away"
+    except Exception:
+        pass
+
+    # ── Header ────────────────────────────────────────────────
+    lines = [
+        f"📊 <b>{name} ({ticker})</b>",
+        f"🕐 {ct_now_str()}",
+        DIV,
+        "",
+        f"💵 <b>${price}</b>  {chg_emoji} <b>{chg_color}{chg:.2f}%</b> today",
+        f"🏦 {format_market_cap(stock['market_cap'])} cap  ·  {_e(stock['sector'])}",
+    ]
+
+    if earnings_line:
+        lines += ["", earnings_line]
+
+    # Risk row
+    risk_parts = []
+    if stock.get("beta") is not None:
+        b = stock["beta"]
+        blabel = "High volatility" if b > 1.5 else ("Low volatility" if b < 0.8 else "Normal volatility")
+        risk_parts.append(f"Beta {b} ({blabel})")
+    if stock.get("short_interest") is not None:
+        si = stock["short_interest"]
+        si_label = "🔴 Squeeze risk!" if si > 20 else ("⚠️ Elevated" if si > 10 else "Normal")
+        risk_parts.append(f"Short {si}% float ({si_label})")
+    if risk_parts:
+        lines.append(f"📌 {_e('  ·  '.join(risk_parts))}")
+
+    # ── 52-Week range ─────────────────────────────────────────
+    lines += [
+        "",
+        DIV,
+        f"📅 <b>52-Week Range</b>",
+        f"   Low <b>${tech['week52_low']}</b>  {range_bar if range_desc else ''}  High <b>${tech['week52_high']}</b>",
+    ]
+    if range_desc:
+        lines.append(f"   {range_desc}  ·  <i>{_e(tech['high_label'])}</i>")
+
+    # ── Support / Resistance / ATR ────────────────────────────
+    if tech.get("support") and tech.get("resistance"):
+        lines += [
+            "",
+            f"🎯 <b>Key Levels</b>  <i>(20-day)</i>",
+            f"   🟢 Support    <b>${tech['support']}</b>  <i>{tech['pct_to_support']:+.1f}% below</i>",
+            f"   🔴 Resistance <b>${tech['resistance']}</b>  <i>{tech['pct_to_resist']:+.1f}% above</i>",
+        ]
+        if tech.get("atr"):
+            sl = round(price - tech["atr"] * 1.5, 2)
+            lines.append(f"   📐 ATR ±${tech['atr']}  →  <i>stop-loss ~${sl}</i>")
+
+    # ── Technical signals ─────────────────────────────────────
+    lines += [
+        "",
+        DIV,
+        "📈 <b>TECHNICAL ANALYSIS</b>",
+        "",
+        f"   RSI <b>{tech['rsi']}</b>  {_e(tech['rsi_label'])}",
+        f"   MACD   {_e(tech['macd_label'])}",
+        f"   Trend  {_e(tech['ma_label'] or 'Not enough data yet')}",
+    ]
+
+    bb = tech.get("bollinger", {})
+    if bb.get("signal"):
+        pct_b_str = f"  <i>({bb['pct_b']}% of band)</i>" if bb.get("pct_b") is not None else ""
+        lines.append(f"   BB     {_e(bb['signal'])}{pct_b_str}")
+
+    if tech.get("signals"):
+        lines += ["", "🚨 <b>Active Alerts</b>"]
+        for s in tech["signals"]:
+            lines.append(f"   {_e(s)}")
+
+    confidence = tech.get("confidence", "")
+    if confidence:
+        lines += ["", f"   🎖️ <b>Confidence:</b> {_e(confidence)}"]
+
+    # ── Fundamentals ──────────────────────────────────────────
+    lines += [
+        "",
+        DIV,
+        "📐 <b>COMPANY HEALTH</b>",
+        "",
+    ]
+    if fund["notes"]:
+        for note in fund["notes"]:
+            lines.append(f"   {_e(note)}")
+    else:
+        lines.append("   ⚠️ Fundamental data unavailable — check again later")
+
+    # ── News with clickable links ─────────────────────────────
+    lines += [
+        "",
+        DIV,
+        f"📰 <b>NEWS</b>  ·  {_e(sentiment['label'])}",
+        "<i>Tap any headline to read the full article</i>",
+        "",
+    ]
+    top_news = sentiment.get("scored", [])[:4]
+    if top_news:
+        for n in top_news:
+            title = _e(n["title"][:80])
+            url   = n.get("link", "")
+            label = _e(n.get("label", ""))
+            source = _e(n.get("source", ""))
+            source_str = f"  <i>{source}</i>" if source else ""
+            if url:
+                lines.append(f'   • <a href="{url}">{title}</a>{source_str}')
+            else:
+                lines.append(f"   • {title}{source_str}")
+            lines.append(f"     ↳ {label}")
+    else:
+        lines.append("   No news found today")
+
+    # ── Yahoo Social Interest ─────────────────────────────────
+    if reddit and reddit.get("available"):
+        lines += ["", DIV]
+        if reddit.get("mentions", 0) > 0 or reddit.get("is_trending"):
+            rank_str = f" (#{reddit['trend_rank']} trending)" if reddit.get("trend_rank") else ""
+            lines += [
+                f"📊 <b>SOCIAL INTEREST</b>  ·  {_e(reddit['hype_label'])}",
+                "",
+                f"   {_e(reddit['sentiment'])}{rank_str}",
+                f"   {_e(reddit.get('note', ''))}",
+                f'   <a href="https://finance.yahoo.com/quote/{ticker}">View on Yahoo Finance →</a>',
+            ]
+        else:
+            lines += [
+                f"📊 <b>SOCIAL INTEREST</b>  ·  🔇 Not trending today",
+                f'   <a href="https://finance.yahoo.com/quote/{ticker}">View on Yahoo Finance →</a>',
+            ]
+
+    # ── Investment Score ──────────────────────────────────────
+    score_bar = "🟩" * (composite // 10) + "⬜" * (10 - composite // 10)
+    lines += [
+        "",
+        DIV,
+        f"🎯 <b>INVESTMENT SCORE: {composite}/100</b>",
+        f"   {score_bar}",
+        f"   {score_label(composite)}",
+        "",
+        f"   <i>{_e(score_summary(composite, stock['ticker'], tech, fund, sentiment))}</i>",
+        DIV,
+        "",
+        "⚠️ <i>Educational only — not financial advice</i>",
+        "💡 /explain rsi  ·  /explain score  ·  /explain 52w",
+    ]
+
+    return "\n".join(lines)
+
+
+EXPLAIN_DICT = {
+    "rsi": (
+        "📊 <b>RSI — Relative Strength Index</b>\n\n"
+        "<b>Simple version:</b> RSI tells you if too many people are buying or selling a stock right now.\n\n"
+        "• <b>Below 30</b> 🟢 = Oversold — heavy selling happened. May be a buying opportunity.\n"
+        "  <i>Like a store clearance sale — but check WHY it's on sale.</i>\n"
+        "• <b>Above 70</b> 🔴 = Overbought — heavy buying happened. Stock may be due for a dip.\n"
+        "• <b>30–70</b> 🟡 = Normal range — no extreme signal.\n\n"
+        "📌 <b>Real example:</b> NVDA RSI dropped to 28 in Jan 2024 → it rallied 40% over the next 3 months."
+    ),
+    "macd": (
+        "📊 <b>MACD — Momentum Indicator</b>\n\n"
+        "<b>Simple version:</b> MACD shows whether a stock's speed (momentum) is increasing or decreasing.\n\n"
+        "• <b>Bullish crossover</b> 🟢 = Momentum turning positive. Like a car shifting into a higher gear.\n"
+        "• <b>Bearish crossover</b> 🔴 = Momentum slowing. The trend may be reversing.\n\n"
+        "📌 <b>Tip:</b> MACD crossovers are more powerful when the RSI also confirms the direction."
+    ),
+    "pe": (
+        "📊 <b>P/E Ratio — Price-to-Earnings</b>\n\n"
+        "<b>Simple version:</b> How many years of profit are you paying for?\n\n"
+        "• <b>P/E 10</b> = You pay $10 for every $1 of annual profit. Cheap.\n"
+        "• <b>P/E 20</b> = Fair value for most stable companies.\n"
+        "• <b>P/E 50+</b> = Very expensive — betting on future explosive growth.\n\n"
+        "📌 <b>Context matters:</b> AI/tech stocks often have P/E 40–100 because investors expect massive growth."
+    ),
+    "52w": (
+        "📊 <b>52-Week High &amp; Low</b>\n\n"
+        "<b>Simple version:</b> The highest and lowest price over the past 12 months.\n\n"
+        "• <b>Near 52W High</b> 🚀 = Stock is at its strongest point in a year. Strong momentum.\n"
+        "• <b>Near 52W Low</b> ⚠️ = Stock is at its weakest point. Could be a bargain — or still falling.\n\n"
+        "📌 <b>Tip:</b> A breakout above the 52W high (on high volume) is one of the strongest buy signals traders use."
+    ),
+    "golden": (
+        "📊 <b>Golden Cross &amp; Death Cross</b>\n\n"
+        "These compare the 50-day and 200-day moving averages.\n\n"
+        "• <b>Golden Cross</b> 🌙 = 50-day crosses ABOVE 200-day. Historically bullish — long-term uptrend.\n"
+        "• <b>Death Cross</b> ☠️ = 50-day crosses BELOW 200-day. Historically bearish — downtrend warning.\n\n"
+        "📌 <b>History:</b> The S&amp;P 500 golden cross in late 2023 preceded a 25% rally."
+    ),
+    "volume": (
+        "📊 <b>Volume Spike</b>\n\n"
+        "<b>Simple version:</b> Way more shares than normal were traded today.\n\n"
+        "• <b>2x+ normal volume on UP day</b> 🟢 = Strong buying conviction — institutional money moving in.\n"
+        "• <b>2x+ normal volume on DOWN day</b> 🔴 = Heavy selling — possible panic or bad news.\n\n"
+        "📌 <b>Rule of thumb:</b> Never trust a price move without checking if volume confirms it."
+    ),
+    "sentiment": (
+        "📊 <b>News Sentiment</b>\n\n"
+        "<b>Simple version:</b> The bot reads today's headlines and scores the mood.\n\n"
+        "• <b>Bullish</b> 🟢 = Headlines are mostly positive about the company\n"
+        "• <b>Bearish</b> 🔴 = More negative news than positive\n"
+        "• <b>Neutral</b> 🟡 = Mixed or no significant news today\n\n"
+        "📌 <b>Tip:</b> Sentiment changes fast. Check again after earnings or major news events."
+    ),
+    "score": (
+        "📊 <b>Investment Score (0–100)</b>\n\n"
+        "The bot combines 4 signals into one easy score:\n\n"
+        "• 30% Technical (RSI, MACD, Moving Averages)\n"
+        "• 25% Fundamental (P/E, revenue growth, EPS)\n"
+        "• 20% Sentiment (news headlines mood)\n"
+        "• 25% Momentum (price trend, volume)\n\n"
+        "🟢 <b>70–100</b> = Strong Buy Signal\n"
+        "🟡 <b>50–70</b>  = Worth watching\n"
+        "🟠 <b>30–50</b>  = Mixed — hold off\n"
+        "🔴 <b>0–30</b>   = Avoid for now\n\n"
+        "📌 <b>Important:</b> No score is a guarantee. Always do your own research."
+    ),
+    "bb": (
+        "📊 <b>Bollinger Bands</b>\n\n"
+        "<b>Simple version:</b> A price channel showing normal vs extreme price moves.\n\n"
+        "• <b>At Lower Band</b> 🟢 = Price is unusually low — possible bounce zone.\n"
+        "• <b>At Upper Band</b> 🔴 = Price is unusually high — possible pullback zone.\n"
+        "• <b>Mid-Band</b> = Normal territory — no strong signal.\n\n"
+        "📌 <b>Power tip:</b> When RSI &lt; 35 AND price touches the lower band at the same time → "
+        "that's a high-confidence oversold signal. Both indicators agreeing = stronger signal."
+    ),
+    "reddit": (
+        "📊 <b>Social Interest — Yahoo Finance Trending</b>\n\n"
+        "<b>Simple version:</b> Is this stock one of the most-searched tickers on Yahoo Finance right now?\n\n"
+        "• <b>Trending #1–3</b> 🚀 = Extremely high retail attention today\n"
+        "• <b>Trending #4–10</b> 🔥 = High interest — many people researching this stock\n"
+        "• <b>Moderate</b> 💬 = Normal chatter — not a strong signal alone\n"
+        "• <b>Not trending</b> 🔇 = Below the radar today\n\n"
+        "📌 <b>Why Yahoo trending matters:</b>\n"
+        "   When retail investors research a stock, they often search Yahoo Finance first.\n"
+        "   A spike in trending rank often precedes a price move.\n"
+        "   Combined with Bullish news sentiment = strong retail momentum signal.\n\n"
+        "⚠️ <b>Warning:</b> Trending ≠ good investment. Always check RSI + fundamentals too."
+    ),
+}
+
