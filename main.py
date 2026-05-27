@@ -2,6 +2,7 @@
 import logging
 import os
 import asyncio
+import html as _html
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, Application
@@ -15,6 +16,7 @@ from commands import (
     cmd_trending, cmd_political, cmd_explain,
     cmd_watch, cmd_unwatch, cmd_watchlist, cmd_reddit,
     cmd_morning, cmd_evening, cmd_button_callback,
+    cmd_social, cmd_buzz,
 )
 from news import get_news
 
@@ -146,29 +148,27 @@ async def political_news_monitor(app: Application):
 
                     badge = impact_badge(impact)
 
-                    # Plain-English explanation of why this matters
                     if impact >= 9:
-                        why = f"🧠 *Why this matters:* {source} statements directly move markets. Traders react within minutes."
+                        why = f"{source} statements move markets immediately."
                     elif impact >= 7:
-                        why = f"🧠 *Why this matters:* {source} has real authority to affect this company through regulation or legislation."
+                        why = f"{source} has authority to affect this company through regulation or legislation."
                     else:
-                        why = f"🧠 *Why this matters:* Notable mention — worth monitoring but may not move price immediately."
+                        why = f"Notable mention — monitor for follow-up action."
 
                     msg = (
-                        f"{badge} *POLITICAL ALERT — {ticker}*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                        f"📰 {a['title']}\n\n"
-                        f"👤 *Source level:* {source} (Impact: {impact}/10)\n"
-                        f"📊 *Market signal:* {sentiment}\n"
-                        f"🕐 {ct_now()}\n\n"
-                        f"{why}\n\n"
-                        f"💡 Run /analyze {ticker} for full investment report\n"
-                        f"⚠️ _Educational only — not financial advice_"
+                        f"<b>{badge} — {ticker}</b>\n"
+                        f"─────────────────────\n\n"
+                        f"{_html.escape(a['title'])}\n\n"
+                        f"<b>Source:</b> {_html.escape(source)}  ·  Impact {impact}/10\n"
+                        f"<b>Signal:</b> {_html.escape(sentiment)}\n"
+                        f"<i>{ct_now()}</i>\n\n"
+                        f"{_html.escape(why)}\n\n"
+                        f"/analyze {ticker}"
                     )
                     if CHAT_ID:
                         await app.bot.send_message(
                             chat_id=CHAT_ID, text=msg,
-                            parse_mode=ParseMode.MARKDOWN,
+                            parse_mode=ParseMode.HTML,
                             disable_web_page_preview=True
                         )
                         logger.info(f"🏛️ [{badge}] Political alert sent — {ticker}: {a['title'][:60]}")
@@ -195,9 +195,9 @@ async def send_live_snapshot(app: Application):
     SNAPSHOT_TICKERS = ["NVDA", "MSFT", "AMD"]
 
     lines = [
-        f"📊 *LIVE MARKET SNAPSHOT*",
-        f"🕐 {ct_now()}",
-        "━━━━━━━━━━━━━━━━━━━━━━",
+        "<b>Live Snapshot</b>",
+        f"<i>{ct_now()}</i>",
+        "─────────────────────",
         "",
     ]
 
@@ -206,31 +206,29 @@ async def send_live_snapshot(app: Application):
         try:
             stock = get_stock_info(ticker)
             if "error" in stock:
-                lines.append(f"⚠️ *{ticker}:* Data unavailable right now")
+                lines.append(f"  <i>{ticker}: data unavailable</i>")
                 continue
 
             chg      = stock["change_pct"]
-            emoji    = "📈" if chg >= 0 else "📉"
-            vol_flag = " ⚡ *Volume spike!*" if stock["volume_ratio"] > 3 else ""
+            arrow    = "▲" if chg >= 0 else "▼"
+            vol_flag = "  ⚡" if stock["volume_ratio"] > 3 else ""
 
             tech = get_technical_signals(stock["history"])
 
             rsi_note = ""
             if tech["rsi"]:
                 if tech["rsi"] < 30:
-                    rsi_note = f"\n   🟢 RSI {tech['rsi']} — Oversold (potential buy zone)"
+                    rsi_note = f"  🟢 RSI {tech['rsi']} — oversold"
                 elif tech["rsi"] > 70:
-                    rsi_note = f"\n   🔴 RSI {tech['rsi']} — Overbought (be cautious)"
-                else:
-                    rsi_note = f"\n   🟡 RSI {tech['rsi']} — Normal range"
+                    rsi_note = f"  🔴 RSI {tech['rsi']} — overbought"
 
             articles = fetch_news(ticker, limit=5)
             sent     = score_news(articles)
 
             lines.append(
-                f"{emoji} *{ticker}* — ${stock['price']} ({chg:+.2f}%){vol_flag}\n"
-                f"   📅 52W Low: ${stock['week52_low']}  |  High: ${stock['week52_high']}{rsi_note}\n"
-                f"   📰 News today: {sent['label']}"
+                f"<b>{ticker}</b>  ${stock['price']}  {arrow} {chg:+.2f}%{vol_flag}\n"
+                f"  52W  ${stock['week52_low']} – ${stock['week52_high']}{rsi_note}\n"
+                f"  News  {sent['label']}"
             )
             any_success = True
 
@@ -239,24 +237,18 @@ async def send_live_snapshot(app: Application):
 
     lines += [
         "",
-        "━━━━━━━━━━━━━━━━━━━━━━",
-        "💡 /analyze NVDA — full deep-dive on any stock",
-        "💡 /trending — all top movers right now",
-        "⚠️ _Not financial advice_",
+        "─────────────────────",
+        "/analyze NVDA  ·  /trending",
     ]
 
     if any_success:
-        await app.bot.send_message(chat_id=CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=CHAT_ID, text="\n".join(lines), parse_mode=ParseMode.HTML)
         logger.info("✅ Live startup snapshot sent")
     else:
         await app.bot.send_message(
             chat_id=CHAT_ID,
-            text=(
-                "⚠️ *Live data unavailable right now*\n\n"
-                "Yahoo Finance may be rate-limiting. This is normal at startup.\n"
-                "Try /analyze NVDA in 60 seconds — it should work fine."
-            ),
-            parse_mode=ParseMode.MARKDOWN
+            text="Data unavailable at startup — Yahoo Finance may be rate-limiting.\nTry /analyze NVDA in 60 seconds.",
+            parse_mode=ParseMode.HTML,
         )
 
 
@@ -273,7 +265,9 @@ async def send_startup_message(app: Application):
             BotCommand("sector",    "Sector movers — /sector AI"),
             BotCommand("morning",   "Trigger morning market brief now"),
             BotCommand("evening",   "Trigger closing report now"),
-            BotCommand("political", "Political signals — /political NVDA"),
+            BotCommand("social",    "Reddit + Google Trends + Congress — /social NVDA"),
+            BotCommand("buzz",      "What Reddit is talking about right now"),
+            BotCommand("political", "Political signals + congress trades — /political NVDA"),
             BotCommand("reddit",    "Yahoo trending + social interest — /reddit NVDA"),
             BotCommand("watch",     "Add to watchlist — /watch NVDA"),
             BotCommand("unwatch",   "Remove from watchlist — /unwatch NVDA"),
@@ -292,28 +286,26 @@ async def send_startup_message(app: Application):
         return
 
     msg = (
-        "🟢 *StockBot is LIVE!*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 *Started:* {ct_now()}\n\n"
-        "📌 *Commands:*\n"
-        "  /analyze NVDA — Full analyst report with score\n"
-        "  /sector AI — Top movers in AI/Semi/Cloud/Software\n"
-        "  /trending — Today's top 5 momentum stocks\n"
-        "  /political NVDA — Political & government signals\n"
-        "  /reddit NVDA — Reddit/WSB hype & social buzz\n"
-        "  /watch NVDA — Add to your watchlist\n"
-        "  /explain rsi — Plain-English metric guide\n\n"
-        "🏛️ *Smart Political Monitor:* ON\n"
-        "   Only fires for President, Fed Chair, SEC, Congress\n"
-        "   Low-level mentions are silently ignored\n\n"
-        "⏰ *Auto Reports (alerts.yml):*\n"
-        "   🌅 8:00 AM CT Mon–Fri — Pre-market brief\n"
-        "   📊 4:30 PM CT Mon–Fri — Closing report\n"
-        "   📅 Sunday 9:00 AM CT — Weekly deep-dive\n\n"
-        "📊 _Fetching live snapshot in a moment…_\n"
-        "⚠️ _Educational use only. Not financial advice._"
+        "<b>StockBot</b> is live\n"
+        f"<i>{ct_now()}</i>\n"
+        "─────────────────────\n\n"
+        "<b>Commands</b>\n"
+        "  /analyze NVDA — full analyst report\n"
+        "  /sector AI — sector movers\n"
+        "  /trending — top momentum stocks\n"
+        "  /political NVDA — political signals\n"
+        "  /reddit NVDA — social interest\n"
+        "  /watch NVDA · /watchlist\n"
+        "  /explain rsi — metric guide\n\n"
+        "<b>Political Monitor</b>  active\n"
+        "  Alerts only for: President, Fed Chair, SEC, Congress\n\n"
+        "<b>Scheduled Briefs</b>  (GitHub Actions)\n"
+        "  🌅 8:00 AM CT Mon–Fri — pre-market\n"
+        "  📊 4:30 PM CT Mon–Fri — closing\n"
+        "  📅 Sunday 9:00 AM CT — weekly\n\n"
+        "<i>Fetching live snapshot…</i>"
     )
-    await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
+    await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.HTML)
     logger.info(f"✅ Startup message sent to chat {CHAT_ID}")
 
     asyncio.create_task(political_news_monitor(app))
@@ -361,7 +353,9 @@ def main():
     app.add_handler(CommandHandler("reddit",    cmd_reddit))
     app.add_handler(CommandHandler("morning",   cmd_morning))
     app.add_handler(CommandHandler("evening",   cmd_evening))
-    app.add_handler(CallbackQueryHandler(cmd_button_callback))  # inline button taps
+    app.add_handler(CommandHandler("social",    cmd_social))
+    app.add_handler(CommandHandler("buzz",      cmd_buzz))
+    app.add_handler(CallbackQueryHandler(cmd_button_callback))
 
     logger.info("✅ StockBot running — listening for commands")
     app.run_polling(drop_pending_updates=True)
