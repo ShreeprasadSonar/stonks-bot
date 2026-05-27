@@ -274,7 +274,7 @@ async def send_startup_message(app: Application):
             BotCommand("morning",   "Trigger morning market brief now"),
             BotCommand("evening",   "Trigger closing report now"),
             BotCommand("political", "Political signals — /political NVDA"),
-            BotCommand("reddit",    "Reddit/WSB buzz — /reddit NVDA"),
+            BotCommand("reddit",    "Yahoo trending + social interest — /reddit NVDA"),
             BotCommand("watch",     "Add to watchlist — /watch NVDA"),
             BotCommand("unwatch",   "Remove from watchlist — /unwatch NVDA"),
             BotCommand("watchlist", "View your saved stocks"),
