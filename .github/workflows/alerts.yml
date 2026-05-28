@@ -1,8 +1,5 @@
 name: StockBot — Scheduled Alerts
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 on:
   schedule:
     # Pre-market brief — 8:00 AM EST (13:00 UTC) Mon-Fri
@@ -30,6 +27,7 @@ jobs:
       - name: Send scheduled alerts
         env:
           TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
           FINNHUB_API_KEY:      ${{ secrets.FINNHUB_API_KEY }}
           REDDIT_CLIENT_ID:     ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
