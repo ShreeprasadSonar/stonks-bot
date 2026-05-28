@@ -1,16 +1,18 @@
 name: StockBot — Run 24/7
 
 on:
-  workflow_dispatch:  # Only runs when YOU click "Run workflow" manually
+  workflow_dispatch:  # Manual start
+  schedule:
+    - cron: '0 */5 * * *'  # Auto-restart every 5 hours (before the 6h kill limit)
 
 concurrency:
   group: stockbot-run
-  cancel-in-progress: true
+  cancel-in-progress: true  # New run cancels old one — keeps only one instance alive
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 330  # 5.5h — exits cleanly before GitHub's hard 6h kill
 
     steps:
       - name: Checkout code
