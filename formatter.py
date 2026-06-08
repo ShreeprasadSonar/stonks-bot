@@ -1,330 +1,418 @@
-"""
-Investment Theme Tracker — detects narrative shifts in the market.
+"""Format analysis results into clean, professional Telegram messages (HTML mode)."""
+import html as _html
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from fetcher import format_market_cap
 
-Scans Google News headlines + Reddit RSS + Google Trends to measure
-how much buzz each macro investment theme is generating RIGHT NOW.
+CT  = ZoneInfo("America/Chicago")
+DIV = "─────────────────────"
 
-Example: when "AI power demand" starts appearing constantly in headlines
-while "AI chips" cools off, this module surfaces that shift before
-the stock prices fully move.
 
-All free — no API keys.
-"""
-import logging
-import re
-import feedparser
-import requests
+def ct_now_str() -> str:
+    return datetime.now(CT).strftime("%a %b %d · %I:%M %p CT")
 
-logger = logging.getLogger(__name__)
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+def _e(text) -> str:
+    return _html.escape(str(text))
 
-# ─────────────────────────────────────────────────────────────────────────────
-# THEME DEFINITIONS
-# Each theme has:
-#   keywords   — words to scan for in headlines (ANY match counts)
-#   tickers    — stocks that directly benefit from this theme
-#   description — plain English explanation for beginners
-# ─────────────────────────────────────────────────────────────────────────────
-THEMES = {
-    "AI Power & Energy": {
-        "keywords": [
-            "data center power", "power demand", "electricity grid", "nuclear power",
-            "energy consumption", "power plant", "grid capacity", "hyperscaler",
-            "data center energy", "power infrastructure", "gigawatt", "megawatt",
-        ],
-        "tickers": ["VST", "CEG", "ETN", "NRG", "AES", "GEV", "PWR", "EMR"],
-        "description": (
-            "AI data centers use enormous amounts of electricity. "
-            "Companies that build power infrastructure, nuclear plants, "
-            "and electrical equipment are the picks-and-shovels play for the AI era."
-        ),
-        "trend_query": "data center power demand",
-    },
-    "AI Chips & Semiconductors": {
-        "keywords": [
-            "gpu", "chip", "semiconductor", "nvdia", "amd chip", "inference",
-            "training chip", "ai accelerator", "hbm memory", "chip shortage",
-            "foundry", "wafer", "tsmc", "advanced packaging",
-        ],
-        "tickers": ["NVDA", "AMD", "TSM", "ASML", "AMAT", "LRCX", "SMCI", "MU"],
-        "description": (
-            "The core AI hardware theme — GPUs, memory chips, and chipmaking equipment. "
-            "This was the dominant theme in 2023–2024. "
-            "Watch for shifts if AI inference moves to custom silicon."
-        ),
-        "trend_query": "AI semiconductor chips",
-    },
-    "AI Software & Applications": {
-        "keywords": [
-            "ai agent", "copilot", "llm", "large language model", "openai",
-            "anthropic", "gemini", "agentic", "ai application", "ai platform",
-            "ai workflow", "enterprise ai", "ai software",
-        ],
-        "tickers": ["MSFT", "GOOGL", "META", "CRM", "NOW", "ADBE", "ORCL", "PLTR"],
-        "description": (
-            "Software companies embedding AI into products — "
-            "Microsoft Copilot, Salesforce Einstein, ServiceNow, etc. "
-            "This theme picks up when hardware investment matures and apps layer on top."
-        ),
-        "trend_query": "AI software enterprise",
-    },
-    "Cloud Infrastructure": {
-        "keywords": [
-            "cloud spending", "cloud growth", "aws", "azure", "google cloud",
-            "cloud migration", "cloud revenue", "hyperscaler capex",
-            "cloud infrastructure", "cloud contract",
-        ],
-        "tickers": ["AMZN", "MSFT", "GOOGL", "SNOW", "DDOG", "NET", "MDB"],
-        "description": (
-            "Cloud spending is the highway AI runs on. "
-            "When hyperscalers (AWS, Azure, GCP) report strong capex guidance, "
-            "the entire cloud ecosystem benefits."
-        ),
-        "trend_query": "cloud computing spending",
-    },
-    "Defense & National Security": {
-        "keywords": [
-            "defense contract", "military ai", "drone warfare", "pentagon budget",
-            "national security", "defense spending", "weapons system",
-            "autonomous weapon", "cyber warfare", "missile defense",
-        ],
-        "tickers": ["PLTR", "RTX", "LMT", "NOC", "ANSS", "BWXT", "KTOS"],
-        "description": (
-            "Geopolitical tensions drive defense budgets higher. "
-            "AI + defense convergence is a growing theme — drones, autonomous systems, "
-            "and intelligence software are all benefiting."
-        ),
-        "trend_query": "AI defense military spending",
-    },
-    "Cybersecurity": {
-        "keywords": [
-            "cyberattack", "ransomware", "data breach", "hack", "zero-day",
-            "cybersecurity spending", "identity threat", "soc", "endpoint security",
-            "cloud security", "network security",
-        ],
-        "tickers": ["CRWD", "PANW", "ZS", "FTNT", "S", "OKTA"],
-        "description": (
-            "Every AI expansion creates new attack surfaces. "
-            "Cybersecurity spending grows every time a major breach hits the news. "
-            "Watch for headline attacks — they spike CRWD, PANW, ZS."
-        ),
-        "trend_query": "cybersecurity breach attack",
-    },
-    "Robotics & Automation": {
-        "keywords": [
-            "humanoid robot", "factory automation", "robot", "autonomous vehicle",
-            "self-driving", "automation", "cobots", "industrial ai",
-            "manufacturing ai", "robotaxi",
-        ],
-        "tickers": ["TSLA", "ABB", "HON", "ROK", "ISRG", "URI"],
-        "description": (
-            "Physical AI — robots, automation, and autonomous systems. "
-            "Tesla Optimus, humanoid robots, and factory automation are growing narratives "
-            "as labor costs rise and AI capabilities mature."
-        ),
-        "trend_query": "humanoid robot automation",
-    },
-    "Biotech & Healthcare AI": {
-        "keywords": [
-            "drug discovery", "ai drug", "biotech", "fda approval", "clinical trial",
-            "genomics", "precision medicine", "weight loss drug", "glp-1",
-            "cancer treatment", "mRNA",
-        ],
-        "tickers": ["LLY", "NVO", "MRNA", "GILD", "AMGN", "VRTX", "RXRX"],
-        "description": (
-            "AI accelerating drug discovery + weight loss drugs (GLP-1) dominating headlines. "
-            "Eli Lilly and Novo Nordisk have become trillion-dollar companies on this theme."
-        ),
-        "trend_query": "AI drug discovery biotech",
-    },
-    "Tariffs & Trade War": {
-        "keywords": [
-            "tariff", "trade war", "import duty", "export ban", "china supply chain",
-            "reshoring", "supply chain", "trade policy", "sanctions",
-            "decoupling", "friend-shoring",
-        ],
-        "tickers": ["AAPL", "TSM", "INTC", "MU", "QCOM", "AMAT"],
-        "description": (
-            "Trade tensions between US and China directly impact tech supply chains. "
-            "Chip export bans, tariffs on electronics, and reshoring mandates "
-            "create winners and losers fast."
-        ),
-        "trend_query": "tariffs trade war technology",
-    },
+
+
+EXPLAIN_DICT = {
+    "rsi": (
+        "<b>RSI — Relative Strength Index</b>\n\n"
+        "Tells you if a stock is being bought or sold too aggressively.\n\n"
+        "• <b>&lt; 30</b> 🟢 Oversold — heavy selling. Possible bounce zone.\n"
+        "• <b>&gt; 70</b> 🔴 Overbought — heavy buying. Pullback may follow.\n"
+        "• <b>30–70</b> 🟡 Normal — no extreme signal.\n\n"
+        "<b>Example:</b> NVDA RSI hit 28 in Jan 2024 → rallied 40% over the next 3 months."
+    ),
+    "macd": (
+        "<b>MACD — Momentum Indicator</b>\n\n"
+        "Shows whether a stock's price momentum is accelerating or fading.\n\n"
+        "• <b>Bullish crossover</b> 🟢 Momentum turning positive.\n"
+        "• <b>Bearish crossover</b> 🔴 Momentum slowing — trend may reverse.\n\n"
+        "<b>Tip:</b> MACD crossovers are stronger when RSI confirms the same direction."
+    ),
+    "pe": (
+        "<b>P/E Ratio — Price-to-Earnings</b>\n\n"
+        "How many years of profit you're paying for today.\n\n"
+        "• <b>P/E 10</b> — $10 per $1 annual profit. Cheap.\n"
+        "• <b>P/E 20</b> — Fair value for stable companies.\n"
+        "• <b>P/E 50+</b> — Expensive. Market expects explosive growth.\n\n"
+        "<b>Note:</b> AI/tech stocks often carry P/E 40–100 due to growth expectations."
+    ),
+    "52w": (
+        "<b>52-Week High &amp; Low</b>\n\n"
+        "The highest and lowest prices over the past 12 months.\n\n"
+        "• Near <b>52W High</b> 🚀 Strong momentum — stock at peak strength.\n"
+        "• Near <b>52W Low</b> ⚠️ At weakest point — bargain or still falling?\n\n"
+        "<b>Tip:</b> A breakout above the 52W high on high volume = one of the strongest buy signals."
+    ),
+    "golden": (
+        "<b>Golden Cross &amp; Death Cross</b>\n\n"
+        "Compares the 50-day and 200-day moving averages.\n\n"
+        "• <b>Golden Cross</b> 🌙 50-day crosses above 200-day → bullish long-term.\n"
+        "• <b>Death Cross</b> ☠️ 50-day crosses below 200-day → downtrend warning.\n\n"
+        "<b>History:</b> The S&P 500 golden cross in late 2023 preceded a 25% rally."
+    ),
+    "volume": (
+        "<b>Volume Spike</b>\n\n"
+        "Way more shares traded than normal — institutional money is moving.\n\n"
+        "• <b>2x+ on UP day</b> 🟢 Strong conviction buying.\n"
+        "• <b>2x+ on DOWN day</b> 🔴 Heavy selling — possible panic.\n\n"
+        "<b>Rule:</b> Never trust a price move that isn't backed by volume."
+    ),
+    "sentiment": (
+        "<b>News Sentiment</b>\n\n"
+        "The bot reads today's headlines and scores the overall mood.\n\n"
+        "• <b>Bullish</b> 🟢 Headlines are mostly positive.\n"
+        "• <b>Bearish</b> 🔴 More negative news than positive.\n"
+        "• <b>Neutral</b> 🟡 Mixed or no significant news.\n\n"
+        "<b>Tip:</b> Sentiment changes fast. Recheck after earnings or major announcements."
+    ),
+    "score": (
+        "<b>Investment Score (0–100)</b>\n\n"
+        "Four signals combined into one number:\n\n"
+        "  30% Technical  (RSI, MACD, moving averages)\n"
+        "  25% Fundamental  (P/E, revenue, EPS)\n"
+        "  20% Sentiment  (news headline mood)\n"
+        "  25% Momentum  (price trend, volume)\n\n"
+        "🟢 <b>70–100</b>  Strong signal\n"
+        "🟡 <b>50–70</b>   Worth watching\n"
+        "🟠 <b>30–50</b>   Mixed — hold off\n"
+        "🔴 <b>0–30</b>    Avoid for now"
+    ),
+    "bb": (
+        "<b>Bollinger Bands</b>\n\n"
+        "A price channel showing normal vs extreme moves.\n\n"
+        "• <b>At lower band</b> 🟢 Price unusually low — possible bounce.\n"
+        "• <b>At upper band</b> 🔴 Price unusually high — possible pullback.\n"
+        "• <b>Mid-band</b> Normal territory.\n\n"
+        "<b>Power combo:</b> RSI &lt; 35 <i>and</i> price at lower band = high-confidence oversold signal."
+    ),
+    "reddit": (
+        "<b>Social Interest — Yahoo Finance Trending</b>\n\n"
+        "Is this stock in the most-searched tickers on Yahoo Finance right now?\n\n"
+        "• <b>#1–3</b> 🚀 Extremely high retail attention\n"
+        "• <b>#4–10</b> 🔥 High interest — people are researching it\n"
+        "• <b>Not trending</b> 🔇 Below the radar today\n\n"
+        "<b>Why it matters:</b> A spike in trending rank often precedes a price move — especially when combined with bullish news."
+    ),
 }
 
 
-def _scan_google_news(query: str, limit: int = 20) -> list[str]:
-    """Fetch Google News RSS headlines for a theme query."""
+
+def score_label(score: int) -> str:
+    if score >= 70: return "🟢 Strong Buy Signal"
+    if score >= 50: return "🟡 Watch — Worth Monitoring"
+    if score >= 30: return "🟠 Hold — Mixed Signals"
+    return "🔴 Avoid — Bearish Signs"
+
+
+def score_summary(score: int, ticker: str, tech: dict, fund: dict, sentiment: dict) -> str:
+    """One-sentence plain-English explanation of the score."""
+    reasons = []
+    if tech["score"] >= 60:
+        reasons.append("technical charts are looking bullish")
+    elif tech["score"] <= 35:
+        reasons.append("technical charts look weak")
+    if fund["score"] >= 60:
+        reasons.append("the company's financials are strong")
+    elif fund["score"] <= 35:
+        reasons.append("earnings/growth look concerning")
+    sent_score = max(0, min(100, (sentiment["score"] + 1) * 50))
+    if sent_score >= 60:
+        reasons.append("recent news is mostly positive")
+    elif sent_score <= 35:
+        reasons.append("news headlines are mostly negative")
+    if not reasons:
+        return f"Signals are mixed for {ticker} — monitor closely before acting."
+    return f"{ticker} scores {score}/100 because {', and '.join(reasons)}."
+
+
+def format_analyze_report(stock: dict, tech: dict, fund: dict, sentiment: dict, reddit: dict = None) -> str:
+    """
+    Returns an HTML-formatted report for Telegram (use ParseMode.HTML).
+    News headlines are embedded hyperlinks — tap to read the full article.
+    """
+    ticker    = _e(stock["ticker"])
+    name      = _e(stock["name"])
+    price     = stock["price"]
+    chg       = stock["change_pct"]
+    chg_emoji = "📈" if chg >= 0 else "📉"
+    chg_color = "+" if chg >= 0 else ""
+
+    composite = int(
+        tech["score"]  * 0.30 +
+        fund["score"]  * 0.25 +
+        max(0, min(100, (sentiment["score"] + 1) * 50)) * 0.20 +
+        50             * 0.25
+    )
+
+    # ── 52W range bar ─────────────────────────────────────────
     try:
-        q   = query.replace(" ", "+")
-        url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
-        feed = feedparser.parse(url)
-        return [e.get("title", "") for e in feed.entries[:limit]]
+        w52_hi = float(tech["week52_high"])
+        w52_lo = float(tech["week52_low"])
+        pct_of_range = ((price - w52_lo) / (w52_hi - w52_lo) * 100) if w52_hi != w52_lo else 50
+        blocks   = int(pct_of_range / 10)
+        range_bar = "▓" * blocks + "░" * (10 - blocks)
+        range_desc = f"{range_bar}  <i>{pct_of_range:.0f}% of yearly range</i>"
     except Exception:
-        return []
+        range_desc = ""
 
-
-def _scan_reddit_rss(limit: int = 50) -> list[str]:
-    """Fetch hot post titles from r/investing and r/stocks."""
-    titles = []
-    for sub in ["investing", "stocks", "wallstreetbets"]:
-        try:
-            resp = requests.get(
-                f"https://www.reddit.com/r/{sub}/hot.json?limit=25",
-                headers=HEADERS, timeout=8,
-            )
-            if resp.status_code == 200:
-                posts = resp.json()["data"]["children"]
-                titles += [p["data"]["title"] for p in posts]
+    # ── Earnings warning ──────────────────────────────────────
+    earnings_line = ""
+    try:
+        ed = stock.get("earnings_date")
+        if ed:
+            from datetime import datetime as _dt, timezone
+            if hasattr(ed, "to_pydatetime"):
+                ed = ed.to_pydatetime()
+            now      = _dt.now(timezone.utc)
+            ed_aware = ed.replace(tzinfo=timezone.utc) if ed.tzinfo is None else ed
+            days     = (ed_aware - now).days
+            if days <= 0:
+                earnings_line = "⚠️ <b>Earnings just passed</b> — watch for post-earnings move"
+            elif days <= 7:
+                earnings_line = f"🚨 <b>Earnings in {days} days</b> — HIGH RISK. Price can swing ±20%+"
+            elif days <= 14:
+                earnings_line = f"⚠️ <b>Earnings in {days} days</b> — stocks often run up beforehand"
             else:
-                feed = feedparser.parse(f"https://www.reddit.com/r/{sub}/hot.rss")
-                titles += [e.title for e in feed.entries[:25]]
-        except Exception:
-            pass
-    return titles[:limit]
-
-
-def _count_keyword_hits(texts: list[str], keywords: list[str]) -> int:
-    """Count how many texts contain at least one keyword."""
-    hits = 0
-    for text in texts:
-        text_lower = text.lower()
-        if any(kw.lower() in text_lower for kw in keywords):
-            hits += 1
-    return hits
-
-
-def _get_trend_score(query: str) -> int:
-    """
-    Google Trends score for the query over last 7 days.
-    Returns 0-100 (relative interest). Returns 0 on failure.
-    """
-    try:
-        from pytrends.request import TrendReq
-        pt = TrendReq(hl="en-US", tz=360, timeout=(5, 15))
-        pt.build_payload([query[:100]], timeframe="now 7-d", geo="US")
-        df = pt.interest_over_time()
-        if df is None or df.empty:
-            return 0
-        col = [c for c in df.columns if c != "isPartial"]
-        if not col:
-            return 0
-        return int(df[col[0]].mean())
+                earnings_line = f"📅 Next earnings: ~{days} days away"
     except Exception:
-        return 0
+        pass
 
-
-def score_themes(use_trends: bool = True) -> list[dict]:
-    """
-    Score all themes by current news + Reddit + Google Trends activity.
-
-    Returns list of theme dicts sorted by score descending:
-    {
-        name, score, momentum_label, headline_hits, reddit_hits,
-        trend_score, tickers, description, top_headlines
-    }
-    """
-    logger.info("Scoring investment themes…")
-    reddit_titles = _scan_reddit_rss()
-    results = []
-
-    for name, theme in THEMES.items():
-        keywords   = theme["keywords"]
-        tickers    = theme["tickers"]
-
-        # Headline hits from Google News
-        news_titles    = _scan_google_news(theme["trend_query"], limit=20)
-        news_hits      = _count_keyword_hits(news_titles, keywords)
-
-        # Reddit hits
-        reddit_hits    = _count_keyword_hits(reddit_titles, keywords)
-
-        # Google Trends (optional — can be slow/rate-limited)
-        trend_score    = _get_trend_score(theme["trend_query"]) if use_trends else 0
-
-        # Composite score: news most important, then trends, then reddit
-        composite = min(100, news_hits * 8 + reddit_hits * 5 + trend_score // 5)
-
-        # Momentum label
-        if composite >= 60:
-            momentum = "🚀 Very Hot"
-        elif composite >= 35:
-            momentum = "🔥 Heating Up"
-        elif composite >= 15:
-            momentum = "💬 Active"
-        else:
-            momentum = "🔇 Quiet"
-
-        # Top relevant headlines
-        top_headlines = [
-            t for t in (news_titles + reddit_titles)
-            if any(kw.lower() in t.lower() for kw in keywords)
-        ][:3]
-
-        results.append({
-            "name":          name,
-            "score":         composite,
-            "momentum":      momentum,
-            "news_hits":     news_hits,
-            "reddit_hits":   reddit_hits,
-            "trend_score":   trend_score,
-            "tickers":       tickers,
-            "description":   theme["description"],
-            "top_headlines": top_headlines,
-        })
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-    logger.info(f"Theme scores: { {r['name'][:20]: r['score'] for r in results[:4]} }")
-    return results
-
-
-def format_themes_report(results: list[dict], top_n: int = 5) -> str:
-    """Format top N themes as an HTML Telegram message."""
-    import html as _h
+    # ── Header ────────────────────────────────────────────────
     lines = [
-        "<b>📡 MARKET NARRATIVE TRACKER</b>",
-        "<i>What institutional &amp; retail investors are focusing on right now</i>",
-        "─────────────────────",
+        f"📊 <b>{name} ({ticker})</b>",
+        f"🕐 {ct_now_str()}",
+        DIV,
+        "",
+        f"💵 <b>${price}</b>  {chg_emoji} <b>{chg_color}{chg:.2f}%</b> today",
+        f"🏦 {format_market_cap(stock['market_cap'])} cap  ·  {_e(stock['sector'])}",
+    ]
+
+    if earnings_line:
+        lines += ["", earnings_line]
+
+    # Risk row
+    risk_parts = []
+    if stock.get("beta") is not None:
+        b = stock["beta"]
+        blabel = "High volatility" if b > 1.5 else ("Low volatility" if b < 0.8 else "Normal volatility")
+        risk_parts.append(f"Beta {b} ({blabel})")
+    if stock.get("short_interest") is not None:
+        si = stock["short_interest"]
+        si_label = "🔴 Squeeze risk!" if si > 20 else ("⚠️ Elevated" if si > 10 else "Normal")
+        risk_parts.append(f"Short {si}% float ({si_label})")
+    if risk_parts:
+        lines.append(f"📌 {_e('  ·  '.join(risk_parts))}")
+
+    # ── 52-Week range ─────────────────────────────────────────
+    lines += [
+        "",
+        DIV,
+        f"📅 <b>52-Week Range</b>",
+        f"   Low <b>${tech['week52_low']}</b>  {range_bar if range_desc else ''}  High <b>${tech['week52_high']}</b>",
+    ]
+    if range_desc:
+        lines.append(f"   {range_desc}  ·  <i>{_e(tech['high_label'])}</i>")
+
+    # ── Support / Resistance / ATR ────────────────────────────
+    if tech.get("support") and tech.get("resistance"):
+        lines += [
+            "",
+            f"🎯 <b>Key Levels</b>  <i>(20-day)</i>",
+            f"   🟢 Support    <b><u>${tech['support']}</u></b>  <i>{tech['pct_to_support']:+.1f}% below</i>",
+            f"   🔴 Resistance <b><u>${tech['resistance']}</u></b>  <i>{tech['pct_to_resist']:+.1f}% above</i>",
+        ]
+        if tech.get("atr"):
+            sl = round(price - tech["atr"] * 1.5, 2)
+            lines.append(f"   📐 ATR ±${tech['atr']}  →  <i>stop-loss ~${sl}</i>")
+
+    # ── Technical signals ─────────────────────────────────────
+    lines += [
+        "",
+        DIV,
+        "📈 <b>TECHNICAL ANALYSIS</b>",
+        "",
+        f"   RSI <b>{tech['rsi']}</b>  {_e(tech['rsi_label'])}",
+        f"   MACD   {_e(tech['macd_label'])}",
+        f"   Trend  {_e(tech['ma_label'] or 'Not enough data yet')}",
+    ]
+
+    bb = tech.get("bollinger", {})
+    if bb.get("signal"):
+        pct_b_str = f"  <i>({bb['pct_b']}% of band)</i>" if bb.get("pct_b") is not None else ""
+        lines.append(f"   BB     {_e(bb['signal'])}{pct_b_str}")
+
+    if tech.get("signals"):
+        lines += ["", "🚨 <b>Active Alerts</b>"]
+        for s in tech["signals"]:
+            lines.append(f"   {_e(s)}")
+
+    confidence = tech.get("confidence", "")
+    if confidence:
+        lines += ["", f"   🎖️ <b>Confidence:</b> {_e(confidence)}"]
+
+    # ── Fundamentals ──────────────────────────────────────────
+    lines += [
+        "",
+        DIV,
+        "📐 <b>COMPANY HEALTH</b>",
         "",
     ]
+    if fund["notes"]:
+        for note in fund["notes"]:
+            lines.append(f"   {_e(note)}")
+    else:
+        lines.append("   ⚠️ Fundamental data unavailable — check again later")
 
-    for i, t in enumerate(results[:top_n], 1):
-        tickers_str = "  ".join(f"<b>{_h.escape(tk)}</b>" for tk in t["tickers"][:5])
-        lines += [
-            f"<b>{i}. {_h.escape(t['name'])}</b>  {t['momentum']}",
-            f"   {tickers_str}",
-            f"   <i>{_h.escape(t['description'])}</i>",
-        ]
-        if t["top_headlines"]:
-            lines.append(f"   📰 {_h.escape(t['top_headlines'][0][:90])}")
-        lines.append("")
-
+    # ── News with clickable links ─────────────────────────────
     lines += [
-        "─────────────────────",
-        "<i>Tap 📡 Narrative Tracker in /market for live updates</i>",
-        "/analyze &lt;TICKER&gt; to deep-dive any stock above",
+        "",
+        DIV,
+        f"📰 <b>NEWS</b>  ·  {_e(sentiment['label'])}",
+        "<i>Tap any headline to read the full article</i>",
+        "",
     ]
+    top_news = sentiment.get("scored", [])[:4]
+    if top_news:
+        for n in top_news:
+            title = _e(n["title"][:80])
+            url   = n.get("link", "")
+            label = _e(n.get("label", ""))
+            source = _e(n.get("source", ""))
+            source_str = f"  <i>{source}</i>" if source else ""
+            if url:
+                lines.append(f'<blockquote>• <a href="{url}">{title}</a>{source_str}\n  ↳ {label}</blockquote>')
+            else:
+                lines.append(f"<blockquote>• {title}{source_str}\n  ↳ {label}</blockquote>")
+    else:
+        lines.append("   No news found today")
+
+    # ── Yahoo Social Interest ─────────────────────────────────
+    if reddit and reddit.get("available"):
+        lines += ["", DIV]
+        if reddit.get("mentions", 0) > 0 or reddit.get("is_trending"):
+            rank_str = f" (#{reddit['trend_rank']} trending)" if reddit.get("trend_rank") else ""
+            lines += [
+                f"📊 <b>SOCIAL INTEREST</b>  ·  {_e(reddit['hype_label'])}",
+                "",
+                f"   {_e(reddit['sentiment'])}{rank_str}",
+                f"   {_e(reddit.get('note', ''))}",
+                f'   <a href="https://finance.yahoo.com/quote/{ticker}">View on Yahoo Finance →</a>',
+            ]
+        else:
+            lines += [
+                f"📊 <b>SOCIAL INTEREST</b>  ·  🔇 Not trending today",
+                f'   <a href="https://finance.yahoo.com/quote/{ticker}">View on Yahoo Finance →</a>',
+            ]
+
+    # ── Investment Score ──────────────────────────────────────
+    score_bar = "🟩" * (composite // 10) + "⬜" * (10 - composite // 10)
+    lines += [
+        "",
+        DIV,
+        f"🎯 <b>SCORE  {composite}/100</b>",
+        f"   {score_bar}  {score_label(composite)}",
+        "",
+        f"<blockquote>{_e(score_summary(composite, stock['ticker'], tech, fund, sentiment))}</blockquote>",
+        DIV,
+        f"<i>/explain rsi  ·  /explain score  ·  /social {stock['ticker']}</i>",
+    ]
+
     return "\n".join(lines)
 
 
-def get_top_theme_tickers(top_n_themes: int = 3) -> list[str]:
-    """
-    Return tickers from the top N hottest themes.
-    Used by get_dynamic_tickers() to inject theme-relevant stocks into movers scan.
-    Skips Google Trends (too slow for this use case).
-    """
-    try:
-        results = score_themes(use_trends=False)
-        tickers = []
-        seen    = set()
-        for theme in results[:top_n_themes]:
-            for t in theme["tickers"]:
-                if t not in seen:
-                    seen.add(t)
-                    tickers.append(t)
-        return tickers
-    except Exception as e:
-        logger.warning(f"get_top_theme_tickers failed: {e}")
-        return []
+EXPLAIN_DICT = {
+    "rsi": (
+        "📊 <b>RSI — Relative Strength Index</b>\n\n"
+        "<b>Simple version:</b> RSI tells you if too many people are buying or selling a stock right now.\n\n"
+        "• <b>Below 30</b> 🟢 = Oversold — heavy selling happened. May be a buying opportunity.\n"
+        "  <i>Like a store clearance sale — but check WHY it's on sale.</i>\n"
+        "• <b>Above 70</b> 🔴 = Overbought — heavy buying happened. Stock may be due for a dip.\n"
+        "• <b>30–70</b> 🟡 = Normal range — no extreme signal.\n\n"
+        "📌 <b>Real example:</b> NVDA RSI dropped to 28 in Jan 2024 → it rallied 40% over the next 3 months."
+    ),
+    "macd": (
+        "📊 <b>MACD — Momentum Indicator</b>\n\n"
+        "<b>Simple version:</b> MACD shows whether a stock's speed (momentum) is increasing or decreasing.\n\n"
+        "• <b>Bullish crossover</b> 🟢 = Momentum turning positive. Like a car shifting into a higher gear.\n"
+        "• <b>Bearish crossover</b> 🔴 = Momentum slowing. The trend may be reversing.\n\n"
+        "📌 <b>Tip:</b> MACD crossovers are more powerful when the RSI also confirms the direction."
+    ),
+    "pe": (
+        "📊 <b>P/E Ratio — Price-to-Earnings</b>\n\n"
+        "<b>Simple version:</b> How many years of profit are you paying for?\n\n"
+        "• <b>P/E 10</b> = You pay $10 for every $1 of annual profit. Cheap.\n"
+        "• <b>P/E 20</b> = Fair value for most stable companies.\n"
+        "• <b>P/E 50+</b> = Very expensive — betting on future explosive growth.\n\n"
+        "📌 <b>Context matters:</b> AI/tech stocks often have P/E 40–100 because investors expect massive growth."
+    ),
+    "52w": (
+        "📊 <b>52-Week High &amp; Low</b>\n\n"
+        "<b>Simple version:</b> The highest and lowest price over the past 12 months.\n\n"
+        "• <b>Near 52W High</b> 🚀 = Stock is at its strongest point in a year. Strong momentum.\n"
+        "• <b>Near 52W Low</b> ⚠️ = Stock is at its weakest point. Could be a bargain — or still falling.\n\n"
+        "📌 <b>Tip:</b> A breakout above the 52W high (on high volume) is one of the strongest buy signals traders use."
+    ),
+    "golden": (
+        "📊 <b>Golden Cross &amp; Death Cross</b>\n\n"
+        "These compare the 50-day and 200-day moving averages.\n\n"
+        "• <b>Golden Cross</b> 🌙 = 50-day crosses ABOVE 200-day. Historically bullish — long-term uptrend.\n"
+        "• <b>Death Cross</b> ☠️ = 50-day crosses BELOW 200-day. Historically bearish — downtrend warning.\n\n"
+        "📌 <b>History:</b> The S&amp;P 500 golden cross in late 2023 preceded a 25% rally."
+    ),
+    "volume": (
+        "📊 <b>Volume Spike</b>\n\n"
+        "<b>Simple version:</b> Way more shares than normal were traded today.\n\n"
+        "• <b>2x+ normal volume on UP day</b> 🟢 = Strong buying conviction — institutional money moving in.\n"
+        "• <b>2x+ normal volume on DOWN day</b> 🔴 = Heavy selling — possible panic or bad news.\n\n"
+        "📌 <b>Rule of thumb:</b> Never trust a price move without checking if volume confirms it."
+    ),
+    "sentiment": (
+        "📊 <b>News Sentiment</b>\n\n"
+        "<b>Simple version:</b> The bot reads today's headlines and scores the mood.\n\n"
+        "• <b>Bullish</b> 🟢 = Headlines are mostly positive about the company\n"
+        "• <b>Bearish</b> 🔴 = More negative news than positive\n"
+        "• <b>Neutral</b> 🟡 = Mixed or no significant news today\n\n"
+        "📌 <b>Tip:</b> Sentiment changes fast. Check again after earnings or major news events."
+    ),
+    "score": (
+        "📊 <b>Investment Score (0–100)</b>\n\n"
+        "The bot combines 4 signals into one easy score:\n\n"
+        "• 30% Technical (RSI, MACD, Moving Averages)\n"
+        "• 25% Fundamental (P/E, revenue growth, EPS)\n"
+        "• 20% Sentiment (news headlines mood)\n"
+        "• 25% Momentum (price trend, volume)\n\n"
+        "🟢 <b>70–100</b> = Strong Buy Signal\n"
+        "🟡 <b>50–70</b>  = Worth watching\n"
+        "🟠 <b>30–50</b>  = Mixed — hold off\n"
+        "🔴 <b>0–30</b>   = Avoid for now\n\n"
+        "📌 <b>Important:</b> No score is a guarantee. Always do your own research."
+    ),
+    "bb": (
+        "📊 <b>Bollinger Bands</b>\n\n"
+        "<b>Simple version:</b> A price channel showing normal vs extreme price moves.\n\n"
+        "• <b>At Lower Band</b> 🟢 = Price is unusually low — possible bounce zone.\n"
+        "• <b>At Upper Band</b> 🔴 = Price is unusually high — possible pullback zone.\n"
+        "• <b>Mid-Band</b> = Normal territory — no strong signal.\n\n"
+        "📌 <b>Power tip:</b> When RSI &lt; 35 AND price touches the lower band at the same time → "
+        "that's a high-confidence oversold signal. Both indicators agreeing = stronger signal."
+    ),
+    "reddit": (
+        "📊 <b>Social Interest — Yahoo Finance Trending</b>\n\n"
+        "<b>Simple version:</b> Is this stock one of the most-searched tickers on Yahoo Finance right now?\n\n"
+        "• <b>Trending #1–3</b> 🚀 = Extremely high retail attention today\n"
+        "• <b>Trending #4–10</b> 🔥 = High interest — many people researching this stock\n"
+        "• <b>Moderate</b> 💬 = Normal chatter — not a strong signal alone\n"
+        "• <b>Not trending</b> 🔇 = Below the radar today\n\n"
+        "📌 <b>Why Yahoo trending matters:</b>\n"
+        "   When retail investors research a stock, they often search Yahoo Finance first.\n"
+        "   A spike in trending rank often precedes a price move.\n"
+        "   Combined with Bullish news sentiment = strong retail momentum signal.\n\n"
+        "⚠️ <b>Warning:</b> Trending ≠ good investment. Always check RSI + fundamentals too."
+    ),
+}
+
