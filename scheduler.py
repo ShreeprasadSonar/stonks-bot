@@ -210,15 +210,25 @@ async def send_morning_brief(bot: Bot):
             sentiment = score_news(articles)
             reddit    = _get_reddit_buzz(ticker)
 
-            top_headline = ""
             if articles:
-                top_headline = _e(articles[0]["title"][:75])
+                a = articles[0]
+                top_title   = _e(a["title"][:80])
+                top_summary = _e(a.get("summary", "")[:160]) if a.get("summary") else ""
+                top_link    = a.get("link", "")
+                top_src     = _e(a.get("source", ""))
+            else:
+                top_title = top_summary = top_link = top_src = ""
 
-            if top_headline or reddit:
+            if top_title or reddit:
                 has_content = True
                 sector_lines.append(f"  <b>{ticker}</b> — {sentiment['label']}")
-                if top_headline:
-                    sector_lines.append(f"    📰 {top_headline}…")
+                if top_title:
+                    if top_link:
+                        sector_lines.append(f'    📰 <a href="{top_link}">{top_title}</a>' + (f"  <i>{top_src}</i>" if top_src else ""))
+                    else:
+                        sector_lines.append(f"    📰 {top_title}")
+                    if top_summary:
+                        sector_lines.append(f"    <i>{top_summary}</i>")
                 if reddit:
                     sector_lines.append(f"    {reddit}")
 
@@ -430,10 +440,22 @@ async def send_closing_report(bot: Bot):
     ]
     for m in losers:
         if m["change_pct"] < 0:
-            articles  = get_news(m["ticker"], limit=3)
-            top_news  = _e(articles[0]["title"][:60]) if articles else "No major news found"
+            articles = get_news(m["ticker"], limit=3)
+            if articles:
+                a         = articles[0]
+                title     = _e(a["title"][:80])
+                summary   = _e(a.get("summary", "")[:160]) if a.get("summary") else ""
+                link      = a.get("link", "")
+                src       = _e(a.get("source", ""))
+                ref       = f'  <i>{src}</i>' if src else ""
+                news_line = f'📰 <a href="{link}">{title}</a>{ref}' if link else f"📰 {title}"
+            else:
+                news_line = "📰 No major news found"
+                summary   = ""
             lines.append(f"  📉 <b>{m['ticker']}</b>  {m['change_pct']:.2f}%")
-            lines.append(f"     📰 {top_news}…")
+            lines.append(f"     {news_line}")
+            if summary:
+                lines.append(f"     <i>{summary}</i>")
 
     # Sector performance
     lines += ["", "📊 <b>Sector Performance:</b>", ""]
@@ -473,7 +495,11 @@ async def send_closing_report(bot: Bot):
 
 
 async def send_weekly_deepdive(bot: Bot):
-    all_tickers = [t for tickers in SECTORS.values() for t in tickers]
+    try:
+        from reddit import get_dynamic_tickers
+        all_tickers = get_dynamic_tickers()
+    except Exception:
+        all_tickers = [t for tickers in SECTORS.values() for t in tickers]
     movers = get_top_movers(all_tickers)
 
     lines = [
