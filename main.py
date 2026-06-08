@@ -17,6 +17,7 @@ from commands import (
     cmd_start, cmd_help, cmd_analyze, cmd_market,
     cmd_social, cmd_political, cmd_watchlist,
     cmd_brief, cmd_explain, cmd_button_callback,
+    cmd_alert, cmd_edgar,
 )
 from news import get_news
 
@@ -207,6 +208,56 @@ def ct_now() -> str:
     return datetime.now(CT).strftime("%a %b %d, %I:%M %p CT")
 
 
+async def price_alert_monitor(app: Application):
+    """Check price alerts every 5 minutes and fire notifications."""
+    import alerts as alert_db
+    from fetcher import get_stock_info
+    logger.info("💰 Price alert monitor started")
+    while True:
+        try:
+            pending = alert_db.get_all_pending()
+            by_ticker: dict = {}
+            for a in pending:
+                by_ticker.setdefault(a["ticker"], []).append(a)
+
+            for ticker, ticker_alerts in by_ticker.items():
+                try:
+                    data = get_stock_info(ticker)
+                    if "error" in data:
+                        continue
+                    price = data["price"]
+                    for a in ticker_alerts:
+                        triggered = (
+                            (a["direction"] == "above" and price >= a["target"]) or
+                            (a["direction"] == "below" and price <= a["target"])
+                        )
+                        if triggered:
+                            arrow  = "▲" if a["direction"] == "above" else "▼"
+                            change = data["change_pct"]
+                            chg_emoji = "📈" if change >= 0 else "📉"
+                            msg = (
+                                f"🔔 <b>PRICE ALERT TRIGGERED</b>\n"
+                                f"─────────────────────\n\n"
+                                f"  {arrow} <b>{ticker}</b>  is now <b>${price}</b>\n"
+                                f"  Your alert: {a['direction']} <b>${a['target']}</b>  ✅\n\n"
+                                f"  {chg_emoji} Today: {change:+.2f}%\n\n"
+                                f"/analyze {ticker}"
+                            )
+                            if CHAT_ID:
+                                await app.bot.send_message(
+                                    chat_id=a["chat_id"], text=msg,
+                                    parse_mode="HTML", disable_web_page_preview=True
+                                )
+                            alert_db.mark_triggered(a["id"])
+                            logger.info(f"🔔 Alert fired: {ticker} {a['direction']} {a['target']} (current: {price})")
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    logger.error(f"Alert check error for {ticker}: {e}")
+        except Exception as e:
+            logger.error(f"Alert monitor error: {e}")
+        await asyncio.sleep(300)  # 5 minutes
+
+
 async def political_news_monitor(app: Application):
     """Background task — checks every 20 min, sends one digest per cycle (not per article)."""
     global _seen_political
@@ -361,6 +412,8 @@ async def send_startup_message(app: Application):
             BotCommand("watchlist", "Manage your watchlist"),
             BotCommand("brief",     "Morning or evening market brief"),
             BotCommand("explain",   "Learn a metric — /explain rsi"),
+            BotCommand("alert",     "Price alert — /alert NVDA above 150"),
+            BotCommand("edgar",     "SEC filings + insider trades — /edgar NVDA"),
             BotCommand("help",      "Show all commands"),
         ])
         logger.info("✅ Bot commands registered (autocomplete menu active)")
@@ -370,12 +423,14 @@ async def send_startup_message(app: Application):
     if not CHAT_ID:
         logger.warning("⚠️ TELEGRAM_CHAT_ID not set — add it as a GitHub Secret")
         asyncio.create_task(political_news_monitor(app))
+        asyncio.create_task(price_alert_monitor(app))
         return
 
     # Suppress startup noise on frequent restarts (e.g. GitHub Actions redeploys)
     if not _should_send_startup():
         logger.info("⏭️ Startup message suppressed — restarted recently (< 6 h)")
         asyncio.create_task(political_news_monitor(app))
+        asyncio.create_task(price_alert_monitor(app))
         return
 
     _mark_startup()
@@ -404,6 +459,7 @@ async def send_startup_message(app: Application):
     logger.info(f"✅ Startup message sent to chat {CHAT_ID}")
 
     asyncio.create_task(political_news_monitor(app))
+    asyncio.create_task(price_alert_monitor(app))
     asyncio.create_task(send_live_snapshot(app))
     logger.info("✅ Background tasks launched")
 
@@ -444,6 +500,8 @@ def main():
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
     app.add_handler(CommandHandler("brief",     cmd_brief))
     app.add_handler(CommandHandler("explain",   cmd_explain))
+    app.add_handler(CommandHandler("alert",     cmd_alert))
+    app.add_handler(CommandHandler("edgar",     cmd_edgar))
     app.add_handler(CallbackQueryHandler(cmd_button_callback))
 
     logger.info("✅ StockBot running — listening for commands")
