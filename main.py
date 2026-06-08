@@ -1,6 +1,8 @@
 """Main entry point for StockBot — with smart political news monitor."""
 import logging
 import os
+import json
+import time as _time
 import asyncio
 import html as _html
 from datetime import datetime
@@ -31,6 +33,48 @@ logger = logging.getLogger("StockBot")
 
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 CT = ZoneInfo("America/Chicago")
+
+# ── Persistent state ─────────────────────────────────────────────────────────
+STATE_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state")
+SEEN_FILE  = os.path.join(STATE_DIR, "seen_articles.json")
+START_FILE = os.path.join(STATE_DIR, "last_startup.txt")
+
+
+def _load_seen() -> set:
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(SEEN_FILE) as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def _save_seen(seen: set):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(SEEN_FILE, "w") as f:
+            json.dump(list(seen)[-500:], f)   # cap to avoid unbounded growth
+    except Exception as e:
+        logger.warning(f"Could not save seen articles: {e}")
+
+
+def _should_send_startup() -> bool:
+    """Return True only if the last startup message was sent > 6 hours ago."""
+    try:
+        with open(START_FILE) as f:
+            return (_time.time() - float(f.read().strip())) > 6 * 3600
+    except Exception:
+        return True  # first run
+
+
+def _mark_startup():
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(START_FILE, "w") as f:
+            f.write(str(_time.time()))
+    except Exception:
+        pass
+
 
 _seen_political: set = set()
 _alert_cooldowns: dict = {}   # ticker → datetime of last alert
@@ -78,6 +122,53 @@ NEGATIVE_WORDS = ["ban", "sanction", "fine", "sue", "block", "tariff",
 ALL_TICKERS = [(t, sector) for sector, tickers in SECTORS.items() for t in tickers]
 
 
+def _build_digest(items: list) -> str:
+    """Build a single HTML digest message from multiple political alert items."""
+    items_sorted = sorted(items, key=lambda x: x["impact"], reverse=True)[:8]
+    lines = [
+        "<b>🏛️ POLITICAL MARKET DIGEST</b>",
+        f"<i>{ct_now()}</i>",
+        "─────────────────────",
+        "",
+    ]
+    tickers_seen: list = []
+    for item in items_sorted:
+        badge  = impact_badge(item["impact"])
+        ticker = item["ticker"]
+        if ticker not in tickers_seen:
+            tickers_seen.append(ticker)
+
+        summary = item.get("summary", "")
+        summary_line = (
+            f"\n   <i>{_html.escape(summary[:300])}</i>" if summary else ""
+        )
+
+        link     = item.get("link", "")
+        news_src = _html.escape(item.get("news_source", ""))
+        ref_str  = ""
+        if link and news_src:
+            ref_str = f'\n   📰 <a href="{_html.escape(link)}">{news_src}</a>'
+        elif link:
+            ref_str = f'\n   📰 <a href="{_html.escape(link)}">Read more</a>'
+
+        why = (
+            f"{item['source']} statements move markets immediately."
+            if item["impact"] >= 9
+            else f"{item['source']} has authority to affect {ticker} through regulation or legislation."
+        )
+        lines += [
+            f"<b>{badge} — {ticker}</b>",
+            f"   {_html.escape(item['title'])}{summary_line}",
+            f"   {_html.escape(item['sentiment'])}{ref_str}",
+            f"   <i>Impact {item['impact']}/10 · {_html.escape(why)}</i>",
+            "",
+        ]
+
+    if tickers_seen:
+        lines.append("  ".join(f"/analyze {t}" for t in tickers_seen[:5]))
+    return "\n".join(lines)
+
+
 def score_political_impact(title: str) -> tuple[int, str, str]:
     """
     Returns (impact_score, source_label, sentiment_label).
@@ -117,61 +208,66 @@ def ct_now() -> str:
 
 
 async def political_news_monitor(app: Application):
-    """Background task — checks every 20 min, only alerts on high-impact news."""
+    """Background task — checks every 20 min, sends one digest per cycle (not per article)."""
+    global _seen_political
+    _seen_political = _load_seen()   # restore across restarts
     logger.info("🏛️ Political monitor started — threshold: impact >= 7 only")
     while True:
         try:
-            for ticker, sector in ALL_TICKERS:
+            # Refresh dynamic tickers each cycle (Yahoo trending + themes + base)
+            try:
+                from reddit import get_dynamic_tickers
+                monitor_tickers = [(t, "dynamic") for t in get_dynamic_tickers()]
+            except Exception:
+                monitor_tickers = ALL_TICKERS
+
+            from datetime import timedelta, timezone
+            now_utc      = datetime.now(timezone.utc)
+            digest_items = []
+
+            for ticker, _ in monitor_tickers:
                 articles = get_news(ticker, limit=15)
                 for a in articles:
                     title_lower = a["title"].lower()
                     impact, source, sentiment = score_political_impact(title_lower)
 
                     if impact < ALERT_THRESHOLD:
-                        continue  # Skip low-level mentions silently
+                        continue
 
                     key = a["title"][:80]
                     if key in _seen_political:
                         continue
                     _seen_political.add(key)
 
-                    # Cooldown: suppress same ticker alerts within 4 hours
-                    from datetime import timedelta, timezone
-                    now_utc = datetime.now(timezone.utc)
                     last_alert = _alert_cooldowns.get(ticker)
                     if last_alert and (now_utc - last_alert) < timedelta(hours=4):
-                        logger.info(f"[{ticker}] Cooldown active — skipping alert (last: {last_alert})")
+                        logger.info(f"[{ticker}] Cooldown active — skipping")
                         continue
                     _alert_cooldowns[ticker] = now_utc
 
-                    badge = impact_badge(impact)
-
-                    if impact >= 9:
-                        why = f"{source} statements move markets immediately."
-                    elif impact >= 7:
-                        why = f"{source} has authority to affect this company through regulation or legislation."
-                    else:
-                        why = f"Notable mention — monitor for follow-up action."
-
-                    msg = (
-                        f"<b>{badge} — {ticker}</b>\n"
-                        f"─────────────────────\n\n"
-                        f"{_html.escape(a['title'])}\n\n"
-                        f"<b>Source:</b> {_html.escape(source)}  ·  Impact {impact}/10\n"
-                        f"<b>Signal:</b> {_html.escape(sentiment)}\n"
-                        f"<i>{ct_now()}</i>\n\n"
-                        f"{_html.escape(why)}\n\n"
-                        f"/analyze {ticker}"
-                    )
-                    if CHAT_ID:
-                        await app.bot.send_message(
-                            chat_id=CHAT_ID, text=msg,
-                            parse_mode=ParseMode.HTML,
-                            disable_web_page_preview=True
-                        )
-                        logger.info(f"🏛️ [{badge}] Political alert sent — {ticker}: {a['title'][:60]}")
+                    digest_items.append({
+                        "ticker":      ticker,
+                        "impact":      impact,
+                        "source":      source,
+                        "sentiment":   sentiment,
+                        "title":       a["title"],
+                        "summary":     a.get("summary", ""),
+                        "link":        a.get("link", ""),
+                        "news_source": a.get("source", ""),
+                    })
 
                 await asyncio.sleep(0.5)
+
+            _save_seen(_seen_political)
+
+            if digest_items and CHAT_ID:
+                msg = _build_digest(digest_items)
+                await app.bot.send_message(
+                    chat_id=CHAT_ID, text=msg,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=False,
+                )
+                logger.info(f"🏛️ Political digest sent — {len(digest_items)} alert(s)")
 
         except Exception as e:
             logger.error(f"Political monitor error: {e}")
@@ -275,6 +371,14 @@ async def send_startup_message(app: Application):
         logger.warning("⚠️ TELEGRAM_CHAT_ID not set — add it as a GitHub Secret")
         asyncio.create_task(political_news_monitor(app))
         return
+
+    # Suppress startup noise on frequent restarts (e.g. GitHub Actions redeploys)
+    if not _should_send_startup():
+        logger.info("⏭️ Startup message suppressed — restarted recently (< 6 h)")
+        asyncio.create_task(political_news_monitor(app))
+        return
+
+    _mark_startup()
 
     msg = (
         "<b>StockBot</b> is live\n"
