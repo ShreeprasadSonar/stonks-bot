@@ -1,8 +1,13 @@
 """Fetch news headlines from Google News RSS (free, no key needed)."""
+import re
 import logging
 import feedparser
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text or "").strip()
 
 
 def get_news(ticker: str, company_name: str = "", limit: int = 10) -> list:
@@ -13,11 +18,15 @@ def get_news(ticker: str, company_name: str = "", limit: int = 10) -> list:
         feed = feedparser.parse(url)
         articles = []
         for entry in feed.entries[:limit]:
+            # summary/description gives context beyond just the headline
+            raw_summary = entry.get("summary", "") or entry.get("description", "")
+            summary = _strip_html(raw_summary)[:400] if raw_summary else ""
             articles.append({
                 "title":     entry.get("title", ""),
                 "published": entry.get("published", ""),
                 "link":      entry.get("link", ""),
                 "source":    entry.get("source", {}).get("title", ""),
+                "summary":   summary,
             })
         logger.debug(f"[{ticker}] Fetched {len(articles)} news articles")
         return articles
