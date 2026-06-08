@@ -1,5 +1,7 @@
 """Telegram bot command handlers — consolidated 8-command interface."""
 import os
+import asyncio
+import time as _time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
@@ -14,8 +16,54 @@ from reddit      import get_reddit_sentiment, format_reddit_report
 from social      import get_full_social_report, get_congress_trades, get_reddit_hot_tickers
 from config      import SECTORS
 import watchlist as wl_db
+import alerts as alert_db
+from edgar import format_edgar_report, get_insider_trades
+from options import get_options_flow, format_options_report
 
 POPULAR_TICKERS = ["NVDA", "MSFT", "AMD", "TSLA", "AAPL", "META", "GOOGL", "AMZN"]
+
+# ── Rate limiter: (user_id, command) → last_called timestamp
+_rate_limits: dict = {}
+_COOLDOWNS = {
+    "analyze": 10, "market": 20, "brief": 60, "social": 15,
+    "political": 15, "edgar": 15, "alert": 5, "default": 5,
+}
+
+def _check_rate_limit(user_id: int, cmd: str) -> float:
+    """Returns seconds remaining in cooldown, or 0 if OK to proceed."""
+    key      = (user_id, cmd)
+    cooldown = _COOLDOWNS.get(cmd, _COOLDOWNS["default"])
+    last     = _rate_limits.get(key, 0)
+    elapsed  = _time.time() - last
+    if elapsed < cooldown:
+        return round(cooldown - elapsed, 1)
+    _rate_limits[key] = _time.time()
+    return 0
+
+async def _send_chunked(target, text: str, mode=ParseMode.HTML, max_len: int = 4000):
+    """Split long messages at newline boundaries and send sequentially."""
+    if len(text) <= max_len:
+        await target(text, parse_mode=mode)
+        return
+    chunks, current = [], []
+    current_len = 0
+    for line in text.split("\n"):
+        line_len = len(line) + 1
+        if current_len + line_len > max_len and current:
+            chunks.append("\n".join(current))
+            current, current_len = [], 0
+        current.append(line)
+        current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    for chunk in chunks:
+        await target(chunk, parse_mode=mode)
+        await asyncio.sleep(0.3)
+
+async def _run_blocking(fn, *args):
+    """Run a blocking function in a thread pool so it doesn't block the event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, fn, *args)
 
 # Cache trending tickers so we don't hit Yahoo on every button press
 _trending_cache: list = []
@@ -78,6 +126,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /watchlist           Manage your saved stocks\n"
         "  /brief               Morning or evening market brief\n"
         "  /explain &lt;TERM&gt;     Learn any metric (rsi · macd · pe · 52w · bb · score)\n"
+        "  /alert &lt;TICKER&gt; &lt;above|below&gt; &lt;PRICE&gt;  Price alert — /alert NVDA above 150\n"
+        "  /edgar &lt;TICKER&gt;     SEC filings + insider trades\n"
         "  /help                This menu"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
@@ -92,9 +142,13 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     ticker = context.args[0].upper()
+    wait = _check_rate_limit(update.effective_user.id, "analyze")
+    if wait:
+        await update.message.reply_text(f"⏳ Slow down! Wait {wait}s.")
+        return
     await update.message.reply_text(f"Analyzing <b>{_e(ticker)}</b>…", parse_mode=ParseMode.HTML)
     try:
-        stock     = get_stock_info(ticker)
+        stock     = await _run_blocking(get_stock_info, ticker)
         if "error" in stock:
             await update.message.reply_text(f"❌ {stock['error']}")
             return
@@ -104,7 +158,33 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sentiment = score_news(articles)
         reddit    = get_reddit_sentiment(ticker)
         report    = format_analyze_report(stock, tech, fund, sentiment, reddit)
-        await update.message.reply_text(report, parse_mode=ParseMode.HTML)
+
+        # Append options and insider data
+        try:
+            options_data = await _run_blocking(get_options_flow, ticker)
+            options_section = "\n\n" + format_options_report(ticker, options_data)
+            report += options_section
+        except Exception:
+            pass
+
+        try:
+            insiders = await _run_blocking(get_insider_trades, ticker)
+            if insiders:
+                buys  = [i for i in insiders if i["direction"] == "buy"]
+                sells = [i for i in insiders if i["direction"] == "sell"]
+                import html as _h
+                insider_lines = [
+                    "", f"<b>🏦 Insider Transactions (Form 4)</b>  <i>🟢 {len(buys)} buys · 🔴 {len(sells)} sells</i>"
+                ]
+                for i in insiders[:3]:
+                    emoji = "🟢" if i["direction"] == "buy" else "🔴"
+                    insider_lines.append(f"  {emoji} {_h.escape(i['title'][:70])}  <i>{i['date']}</i>")
+                insider_lines.append(f"  /edgar {ticker} for full SEC filings")
+                report += "\n".join(insider_lines)
+        except Exception:
+            pass
+
+        await _send_chunked(update.message.reply_text, report)
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
@@ -115,6 +195,11 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from fetcher import get_top_movers
     from technical import get_technical_signals
     from reddit import get_dynamic_tickers, get_trending_tickers
+
+    wait = _check_rate_limit(update.effective_user.id, "market")
+    if wait:
+        await update.message.reply_text(f"⏳ Slow down! Wait {wait}s.")
+        return
 
     # ── Sector deep-dive if arg given: /market AI
     if context.args:
@@ -154,7 +239,7 @@ async def cmd_market(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         all_tickers = [t for tickers in SECTORS.values() for t in tickers]
 
-    movers = get_top_movers(all_tickers)
+    movers = await _run_blocking(get_top_movers, all_tickers)
     gainers = sorted(movers, key=lambda x: x["change_pct"], reverse=True)[:5]
     losers  = sorted(movers, key=lambda x: x["change_pct"])[:3]
 
@@ -323,6 +408,10 @@ async def cmd_social(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     ticker = context.args[0].upper()
+    wait = _check_rate_limit(update.effective_user.id, "social")
+    if wait:
+        await update.message.reply_text(f"⏳ Slow down! Wait {wait}s.")
+        return
     await update.message.reply_text(
         f"Gathering social intelligence for <b>{_e(ticker)}</b>…\n"
         f"<i>Reddit · Google Trends · Congress · Analysts</i>",
@@ -344,6 +433,10 @@ async def cmd_political(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     ticker = context.args[0].upper()
+    wait = _check_rate_limit(update.effective_user.id, "political")
+    if wait:
+        await update.message.reply_text(f"⏳ Slow down! Wait {wait}s.")
+        return
     await update.message.reply_text(f"Checking political signals for <b>{_e(ticker)}</b>…", parse_mode=ParseMode.HTML)
 
     stock  = get_stock_info(ticker)
@@ -431,6 +524,10 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── /brief  (replaces /morning + /evening)
 async def cmd_brief(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Trigger morning or evening brief on demand."""
+    wait = _check_rate_limit(update.effective_user.id, "brief")
+    if wait:
+        await update.message.reply_text(f"⏳ Slow down! Wait {wait}s.")
+        return
     arg = context.args[0].lower() if context.args else ""
 
     if arg in ("morning", "am", "open"):
@@ -490,6 +587,112 @@ async def cmd_explain(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Unknown term. Available: {', '.join(EXPLAIN_DICT.keys())}")
         return
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+
+
+
+
+# ── /alert
+async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /alert NVDA above 150   — alert when NVDA crosses above $150
+    /alert NVDA below 100   — alert when NVDA drops below $100
+    /alert list             — show your active alerts
+    /alert delete <id>      — remove an alert
+    """
+    uid     = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    if not context.args:
+        alerts = alert_db.get_user_alerts(uid)
+        if not alerts:
+            await update.message.reply_text(
+                "📋 <b>No active price alerts.</b>\n\n"
+                "Usage:\n"
+                "  /alert NVDA above 150\n"
+                "  /alert TSLA below 200\n"
+                "  /alert list — view alerts\n"
+                "  /alert delete 3 — remove alert #3",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            lines = ["📋 <b>Your Active Price Alerts</b>", "─────────────────────", ""]
+            for a in alerts:
+                arrow = "▲" if a["direction"] == "above" else "▼"
+                lines.append(f"  <b>#{a['id']}</b>  {arrow} <b>{_e(a['ticker'])}</b>  {a['direction']} <b>${a['target']}</b>")
+            lines += ["", "Remove: /alert delete &lt;id&gt;"]
+            del_rows = [[InlineKeyboardButton(f"✖ #{a['id']} {a['ticker']}", callback_data=f"alert_del:{a['id']}") for a in alerts[i:i+2]]
+                        for i in range(0, len(alerts), 2)]
+            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML,
+                                            reply_markup=InlineKeyboardMarkup(del_rows))
+        return
+
+    arg0 = context.args[0].lower()
+
+    # /alert list
+    if arg0 == "list":
+        context.args = []
+        await cmd_alert(update, context)
+        return
+
+    # /alert delete <id>
+    if arg0 == "delete" and len(context.args) >= 2:
+        try:
+            aid = int(context.args[1])
+            alert_db.delete_alert(aid, uid)
+            await update.message.reply_text(f"✅ Alert #{aid} removed.")
+        except ValueError:
+            await update.message.reply_text("Usage: /alert delete <id>")
+        return
+
+    # /alert TICKER above|below PRICE
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: /alert NVDA above 150\n       /alert TSLA below 200",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    ticker    = context.args[0].upper()
+    direction = context.args[1].lower()
+    if direction not in ("above", "below"):
+        await update.message.reply_text("Direction must be 'above' or 'below'. Example: /alert NVDA above 150")
+        return
+    try:
+        target = float(context.args[2].replace("$","").replace(",",""))
+    except ValueError:
+        await update.message.reply_text("Invalid price. Example: /alert NVDA above 150")
+        return
+
+    aid   = alert_db.add_alert(uid, chat_id, ticker, target, direction)
+    arrow = "▲" if direction == "above" else "▼"
+    await update.message.reply_text(
+        f"✅ Alert set!\n\n"
+        f"  {arrow} <b>{_e(ticker)}</b>  {direction} <b>${target}</b>\n\n"
+        f"<i>I'll notify you when this price is hit. Alert #{aid}</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+
+# ── /edgar
+async def cmd_edgar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """SEC EDGAR filings and insider transactions for a ticker."""
+    if not context.args:
+        await update.message.reply_text(
+            "Which stock? Example: /edgar NVDA",
+            reply_markup=await _ticker_kbd("edgar"),
+        )
+        return
+    ticker = context.args[0].upper()
+    wait   = _check_rate_limit(update.effective_user.id, "edgar")
+    if wait:
+        await update.message.reply_text(f"⏳ Please wait {wait}s before another request.")
+        return
+    await update.message.reply_text(f"📋 Fetching SEC filings for <b>{_e(ticker)}</b>…", parse_mode=ParseMode.HTML)
+    try:
+        report = await _run_blocking(format_edgar_report, ticker)
+        await _send_chunked(update.message.reply_text, report)
+    except Exception as e:
+        await update.message.reply_text(f"❌ EDGAR fetch failed: {e}")
 
 
 # ── Inline button callback handler
@@ -645,3 +848,20 @@ async def cmd_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         if remaining:
             msg += f"\nWatchlist: {', '.join(remaining)}"
         await send(msg)
+
+    elif cmd == "alert_del":
+        try:
+            aid = int(value)
+            alert_db.delete_alert(aid, uid)
+            await send(f"✅ Alert #{aid} removed.")
+        except Exception as e:
+            await send(f"❌ {e}")
+
+    elif cmd == "edgar":
+        ticker = value.upper()
+        await send(f"📋 Fetching SEC filings for <b>{_e(ticker)}</b>…")
+        try:
+            report = await _run_blocking(format_edgar_report, ticker)
+            await _send_chunked(lambda t, **kw: context.bot.send_message(chat_id=chat_id, text=t, **kw), report)
+        except Exception as e:
+            await send(f"❌ {e}")
