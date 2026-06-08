@@ -359,9 +359,19 @@ async def cmd_political(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if hits:
         lines.append("<b>Political News</b>")
         for h in hits[:5]:
-            keywords = ", ".join(h["political_keywords"])
-            lines.append(f"• {_e(h['title'][:90])}")
-            lines.append(f"  <i>{_e(keywords)}</i>")
+            keywords  = ", ".join(h["political_keywords"])
+            title     = _e(h["title"][:90])
+            url       = h.get("link", "")
+            src       = _e(h.get("source", ""))
+            summary   = _e(h.get("summary", "")[:180]) if h.get("summary") else ""
+            ref       = f"  <i>{src}</i>" if src else ""
+            if url:
+                lines.append(f'• <a href="{url}">{title}</a>{ref}')
+            else:
+                lines.append(f"• {title}{ref}")
+            if summary:
+                lines.append(f"  <i>{summary}</i>")
+            lines.append(f"  <i>Keywords: {_e(keywords)}</i>")
         lines.append("")
 
     if trades:
@@ -573,7 +583,17 @@ async def cmd_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await send(f"No political signals found for {ticker}."); return
         lines = [f"<b>Political Signals — {_e(ticker)}</b>", "─────────────────────", ""]
         for h in hits[:4]:
-            lines.append(f"• {_e(h['title'][:90])}")
+            title   = _e(h["title"][:90])
+            url     = h.get("link", "")
+            src     = _e(h.get("source", ""))
+            summary = _e(h.get("summary", "")[:160]) if h.get("summary") else ""
+            ref     = f"  <i>{src}</i>" if src else ""
+            if url:
+                lines.append(f'• <a href="{url}">{title}</a>{ref}')
+            else:
+                lines.append(f"• {title}{ref}")
+            if summary:
+                lines.append(f"  <i>{summary}</i>")
         if trades:
             buy_cnt  = sum(1 for t in trades if "purch" in t["type"].lower())
             sell_cnt = len(trades) - buy_cnt
