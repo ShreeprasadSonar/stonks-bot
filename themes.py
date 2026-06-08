@@ -295,7 +295,7 @@ def format_themes_report(results: list[dict], top_n: int = 5) -> str:
         lines += [
             f"<b>{i}. {_h.escape(t['name'])}</b>  {t['momentum']}",
             f"   {tickers_str}",
-            f"   <i>{_h.escape(t['description'][:120])}…</i>",
+            f"   <i>{_h.escape(t['description'])}</i>",
         ]
         if t["top_headlines"]:
             lines.append(f"   📰 {_h.escape(t['top_headlines'][0][:90])}")
